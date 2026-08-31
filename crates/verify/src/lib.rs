@@ -226,3 +226,29 @@ mod inner_attrs {
     assert_eq!(i.v(), &2);
   }
 }
+
+// ---------------------------------------------------------------------------
+// custom trait: `#[duck(MyValue<_>)]` also auto-implements the user's trait
+// ---------------------------------------------------------------------------
+
+ducks! {
+  pub struct B {
+    #[duck(MyValue<_>)]
+    value: String,
+  }
+
+  trait MyValue<T>: _Value<T> {
+    fn my_get(&self) -> &T {
+      self.value()
+    }
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn custom_trait_auto_impl() {
+    let mut b = B { value: String::from("hello") };
+    assert_eq!(b.my_get(), "hello");
+    b.value_set(String::from("world"));
+    assert_eq!(b.my_get(), "world");
+  }
+}

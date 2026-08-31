@@ -38,14 +38,42 @@
 //! Structs sharing a field name share the same generated trait, regardless of
 //! the field type — that is the whole point: write traits once, implement for
 //! every type that "has a `name`".
+//!
+//! ## Custom traits
+//!
+//! `#[duck(MyTrait(..))]` additionally generates `impl MyTrait(..) for the
+//! struct` right after the accessor impl. A bare `_` inside the parentheses
+//! stands for the marked field's type; all other arguments are kept verbatim
+//! and may reference the struct's own generics:
+//!
+//! ```rust
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     pub struct B {
+//!         #[duck(MyValue<_>)] // also generates: impl MyValue<String> for B
+//!         value: String,
+//!     }
+//!
+//!     trait MyValue<T>: _Value<T> {
+//!         fn my_get(&self) -> &T {
+//!             self.value()
+//!         }
+//!     }
+//! }
+//!
+//! let b = B { value: String::from("hi") };
+//! assert_eq!(b.my_get(), "hi");
+//! ```
 
-use std::collections::{BTreeMap, btree_map};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-  Attribute, Fields, File, Generics, Ident, Item, ItemMod, ItemStruct, Meta, Type, parse2,
+  Attribute, Fields, File, GenericArgument, Generics, Ident, Item, ItemMod, ItemStruct, Meta, Path,
+  PathArguments, Token, Type, parse2, punctuated::Punctuated,
 };
 
 /// Attribute form: `#[ducky] mod name { .. }`.
@@ -132,6 +160,9 @@ struct DuckField {
   generics: Generics,
   field_ident: Ident,
   field_ty: Type,
+  /// Trait paths from `#[duck(MyTrait, ..)]` to additionally implement for the
+  /// struct.
+  custom_impls: Vec<Path>,
 }
 
 fn process_scope(items: &mut Vec<Item>) -> syn::Result<()> {
@@ -171,14 +202,13 @@ fn collect_from_struct(item_struct: &mut ItemStruct, out: &mut Vec<DuckField>) -
           continue;
         };
         let attr = field.attrs.remove(pos);
-        if !matches!(attr.meta, Meta::Path(_)) {
-          return Err(syn::Error::new_spanned(&attr, "`#[duck]` does not take any arguments yet"));
-        }
+        let custom_impls = parse_custom_impls(&attr)?;
         out.push(DuckField {
           struct_ident: item_struct.ident.clone(),
           generics: item_struct.generics.clone(),
           field_ident: field.ident.clone().expect("named field has an ident"),
           field_ty: field.ty.clone(),
+          custom_impls,
         });
       }
     }
@@ -208,13 +238,77 @@ fn is_duck(attr: &Attribute) -> bool {
   attr.path().is_ident("duck")
 }
 
+/// Extracts the trait paths from a `#[duck]` marker: plain `#[duck]` (no
+/// arguments), or `#[duck(MyTrait, ..)]` whose paths the macro additionally
+/// implements for the marked struct.
+fn parse_custom_impls(attr: &Attribute) -> syn::Result<Vec<Path>> {
+  match &attr.meta {
+    Meta::Path(_) => Ok(Vec::new()),
+    Meta::NameValue(_) => {
+      Err(syn::Error::new_spanned(attr, "`#[duck]` does not support name-value arguments"))
+    }
+    Meta::List(_) => {
+      let paths: Punctuated<Path, Token![,]> =
+        attr.parse_args_with(Punctuated::parse_terminated).map_err(|_| {
+          syn::Error::new_spanned(
+            attr,
+            "`#[duck(...)]` expects trait paths, e.g. `#[duck(MyValue<_>)]`",
+          )
+        })?;
+      if paths.is_empty() {
+        return Err(syn::Error::new_spanned(
+          attr,
+          "`#[duck(...)]` requires at least one trait path",
+        ));
+      }
+      Ok(paths.into_iter().collect())
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // trait / impl generation
 // ---------------------------------------------------------------------------
 
+/// Replaces every bare `_` placeholder among `path`'s generic arguments with the
+/// marked field's type; all other arguments are kept verbatim.
+fn fill_placeholders(path: &mut Path, field_ty: &Type) -> syn::Result<()> {
+  for segment in &mut path.segments {
+    match &mut segment.arguments {
+      PathArguments::None => {}
+      PathArguments::Parenthesized(args) => {
+        return Err(syn::Error::new_spanned(
+          args,
+          "`#[duck(...)]` does not support parenthesized generic arguments",
+        ));
+      }
+      PathArguments::AngleBracketed(args) => {
+        for arg in &mut args.args {
+          match arg {
+            GenericArgument::Type(ty) => {
+              if matches!(*ty, Type::Infer(_)) {
+                *ty = field_ty.clone();
+              }
+            }
+            GenericArgument::AssocType(assoc) => {
+              if matches!(assoc.ty, Type::Infer(_)) {
+                assoc.ty = field_ty.clone();
+              }
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
 fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
   // trait name (without leading `_`) -> (getter method base, fields sharing it)
   let mut groups: BTreeMap<String, (String, String, Vec<&DuckField>)> = BTreeMap::new();
+  // (struct, rendered trait path) of custom impls already emitted
+  let mut emitted_custom: BTreeSet<(String, String)> = BTreeSet::new();
 
   for field in fields {
     let trait_name = trait_name_for(&field.field_ident)?;
@@ -276,6 +370,18 @@ fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
               }
           }
       });
+
+      for custom in &field.custom_impls {
+        let mut custom = custom.clone();
+        fill_placeholders(&mut custom, field_ty)?;
+        let rendered = quote!(#custom).to_string();
+        if !emitted_custom.insert((struct_ident.to_string(), rendered)) {
+          continue;
+        }
+        tokens.extend(quote! {
+            impl #impl_generics #custom for #struct_ident #ty_generics #where_clause {}
+        });
+      }
     }
   }
 
