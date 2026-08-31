@@ -4,7 +4,7 @@
 
 ## English
 
-### Eliminates the following repetitive get / set code
+### Eliminates the  repetitive get / set code in trait
 
 ```rust
 struct A { value: i32 }
@@ -41,26 +41,30 @@ impl Opr for B;
 ```rust
 use duck_trait::ducks;
 
-/*-------- Generates the traits and impls; the inner code still lives at file top-level scope --------*/
+/*-------- Generates traits and impls; code stays in scope --------*/
 ducks! { 
   pub struct A {
-    // Marks the field to generate accessors for. `duck` is only a marker attribute; no import needed
+    // Marks the field to generate accessors for.
+    // `duck` is a marker only; no import needed
     #[duck] 
     value: String,
   }
 
-  // Convention: automatically generates the "_Xxx<T>" trait for the field `xxx`
+  // Convention: the field `xxx` generates the "_Xxx<T>" trait
   trait Opr: _Value<String> {
     fn print_val(&self) {
-      println!("{}", self.value());         // Read &xxx via xxx(), this case is &value
+      // Read &xxx via xxx(), this case xxx is value
+      println!("{}", self.value());         
     }
     
     fn set_good(&mut self) {
-      self.value_set(String::from("good")); // Set xxx via xxx_set(_)
+      // Set xxx via xxx_set(_)
+      self.value_set(String::from("good")); 
     }
     
     fn get_mut_val(&mut self) -> &str {
-      self.value_mut()                      // Get &mut xxx via xxx_mut()
+      // Get &mut xxx via xxx_mut()
+      self.value_mut()                      
     }
   }
 
@@ -74,7 +78,8 @@ ducks! {
 /*----------------- Before expansion -----------------*/
 ducks! { 
   pub struct A {
-    #[duck] // Marks the field to generate accessors for
+    // Marks the field to generate accessors for
+    #[duck] 
     value: String,
   }
 }
@@ -102,6 +107,69 @@ impl _Value<String> for A {
 }
 ```
 
+### Generated trait visibility
+
+```rust
+use duck_trait::ducks;
+
+ducks! {
+  pub struct Player {
+    // generates: pub(crate) trait _Name<T>
+    #[duck] 
+    name: String,
+    // generates: pub trait _Score<T>
+    #[duck(pub)] 
+    score: u32,
+    // generates: private trait _Title<T>
+    #[_duck] 
+    title: String,
+  }
+}
+
+// pub(crate): usable anywhere in the crate
+fn shout_name(player: &impl _Name<String>) {
+  println!("{}", player.name());
+}
+
+// pub: external crates can use it too,
+// e.g. as a supertrait of a public trait
+fn shout_score(player: &impl _Score<u32>) {
+  println!("{}", player.score());
+}
+
+// private: usable in this scope only
+fn shout_title(player: &impl _Title<String>) {
+  println!("{}", player.title());
+}
+```
+
+The marker chooses the visibility of the generated trait:
+
+| Marker                      | Generated trait visibility     |
+| --------------------------- | ------------------------------ |
+| `#[duck]`                   | `pub(crate)` (default)         |
+| `#[duck(pub)]`              | `pub`                          |
+| `#[duck(pub = crate)]`      | `pub(crate)`                   |
+| `#[duck(pub = super)]`      | `pub(super)`                   |
+| `#[duck(pub = self)]`       | `pub(self)`                    |
+| `#[duck(pub = crate::foo)]` | `pub(in crate::foo)`           |
+| `#[_duck]`                  | private to the declaring scope |
+
+- `#[duck]` defaults to `pub(crate)` so accessors work across the whole crate without exporting
+  them; `#[duck(pub)]` exports the trait for external users (e.g. as a supertrait of a public
+  trait).
+- The visibility item may sit anywhere in `#[duck(..)]`, next to custom trait paths
+  `#[duck(MyValue<_>, pub = super)]` — at most one visibility item per marker.
+- Markers can be mixed within one struct — each field's trait gets its own visibility
+
+- All structs sharing one trait must declare the same visibility; mismatched markers fail to
+  compile.
+- `pub = <path>` is rendered as `pub(in path)`; the path must start with `crate`, `super`, or
+  `self` and must be an ancestor module of the declaring struct.
+- Block scopes (function bodies, closures, ...) cannot carry visibility qualifiers, so they only
+  accept `#[_duck]`.
+- `#[_duck]` always generates a private trait and rejects `pub` items.
+
 ### Custom accessors
 
 Inside a `#[duck_mod]` / `ducks!` scope, define `trait MyGetSet: _Xxx<some_type>` to create a custom accessor.
@@ -115,13 +183,16 @@ use duck_trait::ducks;
 /*----------------- Before expansion -----------------*/
 ducks! {
   pub struct B {
-    #[duck(MyValue<_>)] // Additionally generates impl MyValue<String> for B
+    // Additionally generates impl MyValue<String> for B
+    #[duck(MyValue<_>)] 
     value: String,
   }
 
-  // The custom trait is bound to the field type via _Value<some_type>
+  // The custom trait binds to the field type
+  // via `_Value<some_type>`
   trait MyValue<V>: _Value<V> {
-    // In Rust you cannot declare a function with the same name as the supertrait (_Value),
+    // In Rust, a method cannot share its name
+    // with the supertrait (_Value);
     // so just pick a nice name yourself
     fn my_get(&self) -> &V {
       // Put your extra logic here
@@ -162,7 +233,8 @@ impl _Value<String> for B {
   }
 }
 
-// All MyValue methods have default implementations, so the generated impl is empty
+// All MyValue methods have default impls,
+// so the generated impl is empty
 impl MyValue<String> for B {}
 
 let b = B { value: String::from("good") };
@@ -204,7 +276,8 @@ ducks! {
     value: i32,
   }
 
-  // A single generic function accepts both structs — this is exactly the point of "duck typing"
+  // A single generic function accepts both structs —
+  // this is exactly the point of "duck typing"
   fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
     format!("{:?}", x.value())
   }
@@ -223,56 +296,6 @@ ducks! {
 - Within the same scope, all structs with the same field name share one trait; different scopes each
   generate their own.
 - The setter takes the value by value and returns `()`.
-
-### Trait visibility
-
-The marker chooses the visibility of the generated trait:
-
-| Marker                              | Generated trait visibility     |
-| ----------------------------------- | ------------------------------ |
-| `#[duck]`                           | `pub(crate)` (default)         |
-| `#[duck(pub)]`                      | `pub`                          |
-| `#[duck(pub = crate)]`              | `pub(crate)`                   |
-| `#[duck(pub = super)]`              | `pub(super)`                   |
-| `#[duck(pub = self)]`               | `pub(self)`                    |
-| `#[duck(pub = crate::foo)]`         | `pub(in crate::foo)`           |
-| `#[_duck]`                          | private to the declaring scope |
-
-- `#[duck]` defaults to `pub(crate)` so accessors work across the whole crate without exporting
-  them; `#[duck(pub)]` exports the trait for external users (e.g. as a supertrait of a public
-  trait).
-- The visibility item may sit anywhere in `#[duck(..)]`, next to custom trait paths:
-  `#[duck(MyValue<_>, pub = super)]` — at most one visibility item per marker.
-- Because the default trait is `pub(crate)`, in-crate callers can use it across module boundaries:
-
-```rust
-use duck_trait::duck_mod;
-
-#[duck_mod]
-mod model {
-  pub struct Player {
-    #[duck] // generates: pub(crate) trait _Name<T>
-    name: String,
-  }
-
-  pub fn make() -> Player {
-    Player { name: "duck".to_owned() }
-  }
-}
-
-// the pub(crate) trait is reachable from any other module of the crate
-fn shout(player: &impl model::_Name<String>) {
-  println!("{}", player.name());
-}
-```
-
-- All structs sharing one trait must declare the same visibility; mismatched markers fail to
-  compile.
-- `pub = <path>` is rendered as `pub(in path)`; the path must start with `crate`, `super`, or
-  `self` and must be an ancestor module of the declaring struct.
-- Block scopes (function bodies, closures, ...) cannot carry visibility qualifiers, so they only
-  accept `#[_duck]`.
-- `#[_duck]` always generates a private trait and rejects `pub` items.
 
 ### Supported features and limitations
 
@@ -322,7 +345,7 @@ cargo clippy --all-targets        # Static checks
 
 Requires Rust 1.85+ (edition 2024).
 
-### Attribute form (not recommended❌) `#[duck_mod]`
+### Attribute form #[duck_mod]`
 
 `#[duck_mod]` is the equivalent attribute-macro form of `ducks!`, applied to an inline module; the
 generated traits (defaulting to `pub(crate)`) stay inside the module namespace.
@@ -339,7 +362,8 @@ mod model {
     value: String,
   }
 
-  // Convention: the field `value` generates the "_Value" accessor trait (generic over the field type T)
+  // Convention: the field `value` generates the "_Value" trait
+  // (generic over the field type T)
   pub trait Opr: _Value<String> {
     fn print_val(&self) {
       // Read &value via value()
@@ -379,7 +403,8 @@ mod model {
     value: i32,
   }
 
-  // A single generic function accepts both structs — this is exactly the point of "duck typing"
+  // A single generic function accepts both structs —
+  // this is exactly the point of "duck typing"
   pub fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
     format!("{:?}", x.value())
   }
@@ -395,7 +420,7 @@ mod model {
 
 ## 中文
 
-### 用于处理如下重复的 get / set 代码
+### 消除 trait 中重复的 get / set 代码
 
 ```rust
 struct A { value: i32 }
@@ -432,25 +457,30 @@ impl Opr for B;
 ```rust
 use duck_trait::ducks;
 
-/*----------------- 负责生成 trait 与 impl，内部代码依然属于文件顶级作用域 -----------------*/
+/*----------------- 生成 trait 与 impl，代码仍在顶级作用域 -----------------*/
 ducks! { 
   pub struct A {
-    #[duck] // 标记要生成访问器的字段。duck 仅作为标记，不需要被引入
+    // 标记要生成访问器的字段；
+    // duck 仅作为标记，不需要被引入
+    #[duck]
     value: String,
   }
 
   // 约定：自动为字段 xxx 生成 “_Xxx<T>” trait
   trait Opr: _Value<String> {
     fn print_val(&self) {
-      println!("{}", self.value());         // 通过 xxx() 获取 &xxx 此处为 &value
+      // 通过 xxx() 获取 &xxx 此处为 &value
+      println!("{}", self.value());         
     }
     
     fn set_good(&mut self) {
-      self.value_set(String::from("good")); // 通过 xxx_set(_) 设置值
+      // 通过 xxx_set(_) 设置值
+      self.value_set(String::from("good")); 
     }
     
     fn get_mut_val(&mut self) -> &str {
-      self.value_mut()                      // 通过 xxx_mut() 获取 &mut xxx
+      // 通过 xxx_mut() 获取 &mut xxx
+      self.value_mut()                      
     }
   }
 
@@ -464,7 +494,8 @@ ducks! {
 /*----------------- 展开前 -----------------*/
 ducks! { 
   pub struct A {
-    #[duck] // 标记要生成访问器的字段
+    // 标记要生成访问器的字段
+    #[duck] 
     value: String,
   }
 }
@@ -492,6 +523,66 @@ impl _Value<String> for A {
 }
 ```
 
+### 生成的 trait 可见性
+
+```rust
+use duck_trait::ducks;
+
+ducks! {
+  pub struct Player {
+    // 生成: pub(crate) trait _Name<T>
+    #[duck] 
+    name: String,
+    // 生成: pub trait _Score<T>
+    #[duck(pub)] 
+    score: u32,
+    // 生成: 私有 trait _Title<T>
+    #[_duck] 
+    title: String,
+  }
+}
+
+// pub(crate)：crate 内任何地方都可用
+fn shout_name(player: &impl _Name<String>) {
+  println!("{}", player.name());
+}
+
+// pub：外部 crate 也能使用，
+// 比如作为公开 trait 的 supertrait
+fn shout_score(player: &impl _Score<u32>) {
+  println!("{}", player.score());
+}
+
+// 私有：仅当前作用域内可用
+fn shout_title(player: &impl _Title<String>) {
+  println!("{}", player.title());
+}
+```
+
+由标记决定生成 trait 的可见性：
+
+| 标记                        | 生成 trait 的可见性      |
+| --------------------------- | ------------------------ |
+| `#[duck]`                   | `pub(crate)`（默认）     |
+| `#[duck(pub)]`              | `pub`                    |
+| `#[duck(pub = crate)]`      | `pub(crate)`             |
+| `#[duck(pub = super)]`      | `pub(super)`             |
+| `#[duck(pub = self)]`       | `pub(self)`              |
+| `#[duck(pub = crate::foo)]` | `pub(in crate::foo)`     |
+| `#[_duck]`                  | 私有，仅声明作用域内可见 |
+
+- `#[duck]` 默认生成 `pub(crate)`，访问器在整个 crate 内可用且不会导出到外部；需要给外部使用
+  （如作为公开 trait 的 supertrait）时用 `#[duck(pub)]`。
+- 可见性项在 `#[duck(..)]` 中位置任意，可与自定义 trait path 混排
+  `#[duck(MyValue<_>, pub = super)]`，但最多写一个。
+- 一个 struct 内可以混用不同可见性的标记，每个字段的 trait 各自独立
+
+- 共享同一个 trait 的所有 struct 必须声明相同可见性，不一致会编译报错。
+- `pub = <path>` 渲染为 `pub(in path)`；path 必须以 `crate`、`super` 或 `self` 开头，且必须是
+  声明 struct 的祖先模块。
+- 块级作用域（函数体、闭包等）内的 item 不能带可见性修饰符，只接受 `#[_duck]`。
+- `#[_duck]` 永远生成私有 trait，并拒绝 `pub` 项。
+
 ### 自定义 访问器
 
 在 `#[duck_mod]` / `ducks!` 作用域内，
@@ -507,7 +598,8 @@ use duck_trait::ducks;
 /*----------------- 展开前 -----------------*/
 ducks! {
   pub struct B {
-    #[duck(MyValue<_>)] // 额外生成 impl MyValue<String> for B
+    // 额外生成 impl MyValue<String> for B
+    #[duck(MyValue<_>)] 
     value: String,
   }
 
@@ -554,7 +646,8 @@ impl _Value<String> for B {
   }
 }
 
-// MyValue 的所有方法均有默认实现，因此自动生成的 impl 为空
+// MyValue 的所有方法均有默认实现，
+// 因此自动生成的 impl 为空
 impl MyValue<String> for B {}
 
 let b = B { value: String::from("good") };
@@ -595,7 +688,8 @@ ducks! {
     value: i32,
   }
 
-  // 一个泛型函数同时接受两个 struct —— 这正是“鸭子类型”的意义
+  // 一个泛型函数同时接受两个 struct ——
+  // 这正是“鸭子类型”的意义
   fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
     format!("{:?}", x.value())
   }
@@ -613,53 +707,6 @@ ducks! {
 - trait 名：字段名转大驼峰并加 `_` 前缀。
 - 同一作用域内，相同字段名的所有 struct 共享同一个 trait；不同作用域各自独立生成。
 - setter 接收值并返回 `()`。
-
-### trait 可见性
-
-由标记决定生成 trait 的可见性：
-
-| 标记                                | 生成 trait 的可见性      |
-| ----------------------------------- | ------------------------ |
-| `#[duck]`                           | `pub(crate)`（默认）     |
-| `#[duck(pub)]`                      | `pub`                    |
-| `#[duck(pub = crate)]`              | `pub(crate)`             |
-| `#[duck(pub = super)]`              | `pub(super)`             |
-| `#[duck(pub = self)]`               | `pub(self)`              |
-| `#[duck(pub = crate::foo)]`         | `pub(in crate::foo)`     |
-| `#[_duck]`                          | 私有，仅声明作用域内可见 |
-
-- `#[duck]` 默认生成 `pub(crate)`，访问器在整个 crate 内可用且不会导出到外部；需要给外部使用
-  （如作为公开 trait 的 supertrait）时用 `#[duck(pub)]`。
-- 可见性项在 `#[duck(..)]` 中位置任意，可与自定义 trait path 混排：
-  `#[duck(MyValue<_>, pub = super)]`，但最多写一个。
-- 默认 trait 是 `pub(crate)`，crate 内的跨模块调用方可以直接使用：
-
-```rust
-use duck_trait::duck_mod;
-
-#[duck_mod]
-mod model {
-  pub struct Player {
-    #[duck] // 生成: pub(crate) trait _Name<T>
-    name: String,
-  }
-
-  pub fn make() -> Player {
-    Player { name: "duck".to_owned() }
-  }
-}
-
-// pub(crate) trait 在 crate 内任何其他模块都可用
-fn shout(player: &impl model::_Name<String>) {
-  println!("{}", player.name());
-}
-```
-
-- 共享同一个 trait 的所有 struct 必须声明相同可见性，不一致会编译报错。
-- `pub = <path>` 渲染为 `pub(in path)`；path 必须以 `crate`、`super` 或 `self` 开头，且必须是
-  声明 struct 的祖先模块。
-- 块级作用域（函数体、闭包等）内的 item 不能带可见性修饰符，只接受 `#[_duck]`。
-- `#[_duck]` 永远生成私有 trait，并拒绝 `pub` 项。
 
 ### 支持与限制
 
@@ -703,7 +750,7 @@ cargo clippy --all-targets        # 静态检查
 
 需要 Rust 1.85+（edition 2024）。
 
-### 属性形式（不推荐⭕️） `#[duck_mod]`
+### 属性形式 `#[duck_mod]`
 
 `#[duck_mod]` 是 `ducks!` 的等价属性宏形式，作用于内联模块，生成的 trait（默认 `pub(crate)`）
 保持在模块命名空间内。
@@ -758,7 +805,8 @@ mod model {
     value: i32,
   }
 
-  // 一个泛型函数同时接受两个 struct —— 这正是“鸭子类型”的意义
+  // 一个泛型函数同时接受两个 struct ——
+  // 这正是“鸭子类型”的意义
   pub fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
     format!("{:?}", x.value())
   }
