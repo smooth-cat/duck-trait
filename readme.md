@@ -1,6 +1,6 @@
 # duck-trait
 
-[中文](#中文) | [English](#english)
+[中文](#user-content-中文) | [English](#user-content-english)
 
 ## English
 
@@ -333,7 +333,7 @@ mod model {
 - `#[duck_mod]` can only be applied to inline modules (`mod name { .. }`); it cannot scan file modules
   (`mod name;`, see "Supported features and limitations").
 
-[中文](#中文) | [English](#english)
+[中文](#user-content-中文) | [English](#user-content-english)
 
 # duck-trait
 
