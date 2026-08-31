@@ -1,38 +1,22 @@
 //! `duck-trait` — stop repeating `get`/`set`/`get_mut` declarations in traits.
 //!
-//! Mark fields with `#[duck]` inside a scope annotated with `#[ducky]` (or
-//! wrapped in `ducks! { .. }`), and the macros generate one accessor trait per
+//! Mark fields with `#[duck]` inside a scope wrapped in `ducks! { .. }` (or
+//! annotated with `#[duck_mod]`), and the macros generate one accessor trait per
 //! field name together with the impls for every marked struct:
 //!
 //! ```rust
-//! use duck_trait::ducky;
+//! use duck_trait::ducks;
 //!
-//! #[ducky]
-//! mod model {
+//! ducks! {
 //!     pub struct Player {
 //!         #[duck]
 //!         name: String,
 //!     }
-//!
-//!     pub trait Show: _Name<String> {
-//!         fn show(&self) {
-//!             println!("{}", self.name());
-//!         }
-//!     }
-//!
-//!     impl Show for Player {}
-//!
-//!     pub fn new_player(name: &str) -> Player {
-//!         let mut player = Player { name: name.to_owned() };
-//!         player.name_set("silly ".to_owned());
-//!         player
-//!     }
 //! }
 //!
-//! use model::{Player, Show};
-//!
-//! let player = model::new_player("duck");
-//! player.show(); // silly duck
+//! let mut player = Player { name: "duck".to_owned() };
+//! player.name_set("silly duck".to_owned());
+//! assert_eq!(player.name(), "silly duck");
 //! ```
 //!
 //! Structs sharing a field name share the same generated trait, regardless of
@@ -65,6 +49,44 @@
 //! let b = B { value: String::from("hi") };
 //! assert_eq!(b.my_get(), "hi");
 //! ```
+//!
+//! ## The `#[duck_mod]` attribute form
+//!
+//! `ducks!` places items directly into the enclosing scope and is the
+//! recommended entry point. `#[duck_mod]` is the equivalent attribute form for
+//! an inline module, keeping the generated traits inside the module's
+//! namespace:
+//!
+//! ```rust
+//! use duck_trait::duck_mod;
+//!
+//! #[duck_mod]
+//! mod model {
+//!     pub struct Player {
+//!         #[duck]
+//!         name: String,
+//!     }
+//!
+//!     pub trait Show: _Name<String> {
+//!         fn show(&self) {
+//!             println!("{}", self.name());
+//!         }
+//!     }
+//!
+//!     impl Show for Player {}
+//!
+//!     pub fn new_player(name: &str) -> Player {
+//!         let mut player = Player { name: name.to_owned() };
+//!         player.name_set("silly ".to_owned());
+//!         player
+//!     }
+//! }
+//!
+//! use model::{Player, Show};
+//!
+//! let player = model::new_player("duck");
+//! player.show(); // silly duck
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
@@ -76,34 +98,35 @@ use syn::{
   PathArguments, Token, Type, parse2, punctuated::Punctuated,
 };
 
-/// Attribute form: `#[ducky] mod name { .. }`.
+/// Attribute form: `#[duck_mod] mod name { .. }`.
 ///
 /// Scans the module (recursively into nested inline modules) for struct fields
 /// marked with `#[duck]`, strips the markers and generates the accessor traits
 /// plus their impls into each scope.
 #[proc_macro_attribute]
-pub fn ducky(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn duck_mod(attr: TokenStream, item: TokenStream) -> TokenStream {
   expand_attr(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Function-like form: `ducks! { .. }`.
 ///
-/// Same transformation as `#[ducky]`, but the wrapped items are placed directly
-/// into the enclosing scope without introducing a module.
+/// Same transformation as `#[duck_mod]`, but the wrapped items are placed
+/// directly into the enclosing scope without introducing a module.
 #[proc_macro]
 pub fn ducks(item: TokenStream) -> TokenStream {
   expand_bang(item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Marker stub. `#[duck]` is consumed (stripped) by `#[ducky]`/`ducks!` before
-/// the compiler ever resolves it, so this macro only runs when the marker is
-/// used outside a ducky scope, or on something other than a struct field.
+/// Marker stub. `#[duck]` is consumed (stripped) by `#[duck_mod]`/`ducks!`
+/// before the compiler ever resolves it, so this macro only runs when the
+/// marker is used outside a duck_mod scope, or on something other than a
+/// struct field.
 #[proc_macro_attribute]
 pub fn duck(_attr: TokenStream, item: TokenStream) -> TokenStream {
   syn::Error::new_spanned(
     TokenStream2::from(item),
     "`#[duck]` must be applied to a named struct field inside a scope \
-         annotated with `#[ducky]` or wrapped in `ducks! { .. }`",
+         annotated with `#[duck_mod]` or wrapped in `ducks! { .. }`",
   )
   .into_compile_error()
   .into()
@@ -115,20 +138,20 @@ pub fn duck(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_attr(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
   if !attr.is_empty() {
-    return Err(syn::Error::new(Span::call_site(), "`#[ducky]` does not take any arguments"));
+    return Err(syn::Error::new(Span::call_site(), "`#[duck_mod]` does not take any arguments"));
   }
 
   let mut module: ItemMod = parse2(item).map_err(|_| {
     syn::Error::new(
       Span::call_site(),
-      "`#[ducky]` can only be applied to an inline module: `#[ducky] mod name { .. }`",
+      "`#[duck_mod]` can only be applied to an inline module: `#[duck_mod] mod name { .. }`",
     )
   })?;
 
   let Some((_, items)) = &mut module.content else {
     return Err(syn::Error::new(
       module.ident.span(),
-      "`#[ducky]` cannot scan a file-based module (`mod name;`); \
+      "`#[duck_mod]` cannot scan a file-based module (`mod name;`); \
              inline the module or use `ducks! { .. }` instead",
     ));
   };
