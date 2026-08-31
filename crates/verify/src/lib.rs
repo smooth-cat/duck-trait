@@ -16,54 +16,54 @@ use duck_trait::{duck_mod, ducks};
 // ---------------------------------------------------------------------------
 
 ducks! {
-    // basic usage
-    pub struct A {
-        #[duck]
-        value: String,
+  // basic usage
+  pub struct A {
+    #[duck]
+    value: String,
+  }
+
+  trait Opr: _Value<String> {
+    fn print_val(&self) {
+      println!("{}", self.value());
     }
 
-    trait Opr: _Value<String> {
-        fn print_val(&self) {
-            println!("{}", self.value());
-        }
-
-        fn set_good(&mut self) {
-            self.value_set(String::from("good"));
-        }
-
-        fn get_mut_val(&mut self) -> &str {
-            self.value_mut()
-        }
+    fn set_good(&mut self) {
+      self.value_set(String::from("good"));
     }
 
-    impl Opr for A {}
-
-    // same field name in different structs shares one trait
-    pub struct S {
-        #[duck]
-        value: String,
+    fn get_mut_val(&mut self) -> &str {
+      self.value_mut()
     }
+  }
 
-    pub struct I {
-        #[duck]
-        value: i32,
-    }
+  impl Opr for A {}
 
-    fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
-        format!("{:?}", x.value())
-    }
+  // same field name in different structs shares one trait
+  pub struct S {
+    #[duck]
+    value: String,
+  }
 
-    // custom trait: `#[duck(MyValue<_>)]` also auto-implements the user's trait
-    pub struct B {
-        #[duck(MyValue<_>)]
-        value: String,
-    }
+  pub struct I {
+    #[duck]
+    value: i32,
+  }
 
-    trait MyValue<T>: _Value<T> {
-        fn my_get(&self) -> &T {
-            self.value()
-        }
+  fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
+    format!("{:?}", x.value())
+  }
+
+  // custom trait: `#[duck(MyValue<_>)]` also auto-implements the user's trait
+  pub struct B {
+    #[duck(MyValue<_>)]
+    value: String,
+  }
+
+  trait MyValue<T>: _Value<T> {
+    fn my_get(&self) -> &T {
+      self.value()
     }
+  }
 }
 
 #[cfg(test)]
@@ -107,13 +107,13 @@ fn custom_trait_auto_impl() {
 // ---------------------------------------------------------------------------
 
 ducks! {
-    pub struct Player {
-        #[duck]
-        name: String,
-        #[duck]
-        score: u32,
-        nickname: String,
-    }
+  pub struct Player {
+    #[duck]
+    name: String,
+    #[duck]
+    score: u32,
+    nickname: String,
+  }
 }
 
 #[cfg(test)]
@@ -317,5 +317,134 @@ mod inner_attrs {
     let mut i = Idle { v: 1 };
     i.v_set(2);
     assert_eq!(i.v(), &2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// deep parsing: structs declared inside function bodies and other block
+// scopes — every block generates (and can only see) its own trait set
+// ---------------------------------------------------------------------------
+
+ducks! {
+  fn deep_in_ducks_fn() -> u8 {
+    struct Local {
+      #[duck]
+      v: u8,
+    }
+    let mut local = Local { v: 1 };
+    local.v_set(5);
+    *local.v()
+  }
+}
+
+#[cfg(test)]
+#[test]
+fn ducks_fn_body_scope() {
+  assert_eq!(deep_in_ducks_fn(), 5);
+}
+
+#[duck_mod]
+mod fn_scopes {
+  pub fn use_local() -> String {
+    struct Local {
+      #[duck]
+      v: String,
+    }
+    let mut local = Local { v: String::from("deep") };
+    local.v_set(String::from("duck"));
+    local.v().clone()
+  }
+
+  pub struct Outer {
+    marker: u8,
+  }
+
+  impl Outer {
+    pub fn deep(&self) -> u8 {
+      struct Inner {
+        #[duck]
+        v: u8,
+      }
+      *Inner { v: self.marker + 1 }.v()
+    }
+  }
+
+  pub fn nested_mod_user() -> u8 {
+    mod inner {
+      pub struct Deep {
+        #[duck]
+        payload: u8,
+      }
+
+      pub fn make() -> u8 {
+        let mut d = Deep { payload: 1 };
+        d.payload_set(9);
+        *d.payload()
+      }
+    }
+    inner::make()
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn local_struct_in_fn_body() {
+    assert_eq!(use_local(), "duck");
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn struct_inside_test_fn() {
+    struct InTest {
+      #[duck]
+      v: u8,
+    }
+    let mut t = InTest { v: 1 };
+    t.v_set(2);
+    assert_eq!(t.v(), &2);
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn struct_in_method_body() {
+    assert_eq!(Outer { marker: 1 }.deep(), 2);
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn struct_in_nested_inline_mod_of_fn_body() {
+    assert_eq!(nested_mod_user(), 9);
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn structs_in_sibling_block_scopes() {
+    {
+      struct InBlock {
+        #[duck]
+        v: u8,
+      }
+      let mut b = InBlock { v: 1 };
+      b.v_set(2);
+      assert_eq!(b.v(), &2);
+    }
+
+    let in_closure = || {
+      struct InClosure {
+        #[duck]
+        v: u8,
+      }
+      *InClosure { v: 3 }.v()
+    };
+    assert_eq!(in_closure(), 3);
+
+    for _ in 0..1 {
+      struct InLoop {
+        #[duck]
+        v: u8,
+      }
+      let mut l = InLoop { v: 4 };
+      l.v_set(5);
+      assert_eq!(l.v(), &5);
+    }
   }
 }

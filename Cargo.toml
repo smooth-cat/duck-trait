@@ -13,7 +13,7 @@ readme = "readme.md"
 [workspace.dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "2", features = ["full", "visit-mut"] }
 
 [profile.dev]
 debug = 0

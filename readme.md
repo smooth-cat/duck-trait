@@ -234,7 +234,9 @@ ducks! {
 - `#[duck(MyTrait(..))]`: in addition to the accessors, automatically implements the custom trait for
   the struct, with the `_` placeholder equal to the field type (supported by both `#[duck_mod]` and
   `ducks!`).
-- Recursively processes nested inline modules; each scope generates its own set of traits.
+- Recursively processes nested inline modules and block scopes: function bodies, closures,
+  `unsafe`/`async`/`const` blocks, loop/`if`/`match` branch blocks and method bodies each get their
+  own set of traits, generated inside the scope where the struct is declared.
 - Detects `_Xxx` naming conflicts before generation and emits a clear compile error on conflict.
 
 **Limitations**
@@ -242,6 +244,8 @@ ducks! {
   implementation.
 - Cannot scan the contents of `mod foo;` file modules (rustc does not pass file contents to macros).
   Use `ducks! { .. }` inside the file or switch to an inline module.
+- Other macro invocations inside the scope are opaque: structs produced by a sibling macro cannot be
+  scanned.
 - The generated traits are private items of the containing module; adjust visibility yourself if you
   need to use them across modules.
 - If a field name clashes with an existing method (e.g. `clone`), call sites may hit method resolution
@@ -566,13 +570,15 @@ ducks! {
   `impl<T: Clone> _Inner<T> for Wrapper<T>`。
 - `#[duck(MyTrait(..))]`：在访问器之外额外为该 struct 自动实现自定义 trait，`_` 占位符等于
   字段类型（`#[duck_mod]` 与 `ducks!` 均支持）。
-- 递归处理嵌套的内联模块，每个作用域生成自己的一组 trait。
+- 递归处理嵌套的内联模块与块级作用域：函数体、闭包、`unsafe`/`async`/`const` 块、
+  loop/`if`/`match` 分支块、方法体各自生成一组 trait，且生成在 struct 所在的作用域内。
 - 生成前检测 `_Xxx` 命名冲突，冲突时给出明确的编译错误。
 
 **限制**
 - `#[duck(MyTrait(..))]` 的自动 impl 要求自定义 trait 所有方法均有默认实现。
 - 无法扫描 `mod foo;` 文件模块的内容（rustc 不会把文件内容传给宏）。请在文件内使用
   `ducks! { .. }` 或改用内联模块。
+- 作用域内的其他宏调用是不透明的：兄弟宏生成的 struct 无法被扫描。
 - 生成的 trait 是所在模块的私有项；如需跨模块使用，需要自行调整可见性。
 - 字段名若与既有方法重名（如 `clone`），调用处可能出现方法解析歧义，这是 Rust trait 方法的固有行为。
 

@@ -87,6 +87,30 @@
 //! let player = model::new_player("duck");
 //! player.show(); // silly duck
 //! ```
+//!
+//! ## Block scopes are scanned too
+//!
+//! Structs declared inside function bodies — or any other block: closures,
+//! loops, match arms, method bodies — get their traits generated in that same
+//! block, so every scope keeps a private set:
+//!
+//! ```rust
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     fn make() -> u8 {
+//!         struct Local {
+//!             #[duck]
+//!             v: u8,
+//!         }
+//!         let mut local = Local { v: 1 };
+//!         local.v_set(2);
+//!         *local.v()
+//!     }
+//! }
+//!
+//! assert_eq!(make(), 2);
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
@@ -94,8 +118,9 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-  Attribute, Fields, File, GenericArgument, Generics, Ident, Item, ItemMod, ItemStruct, Meta, Path,
-  PathArguments, Token, Type, parse2, punctuated::Punctuated,
+  Attribute, Block, Fields, File, GenericArgument, Generics, Ident, Item, ItemEnum, ItemMod,
+  ItemStruct, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type, parse2,
+  punctuated::Punctuated, visit_mut::VisitMut,
 };
 
 /// Attribute form: `#[duck_mod] mod name { .. }`.
@@ -190,31 +215,137 @@ struct DuckField {
 
 fn process_scope(items: &mut Vec<Item>) -> syn::Result<()> {
   let mut collected: Vec<DuckField> = Vec::new();
+  scan_items(items, &mut collected)?;
 
-  for item in items.iter_mut() {
-    match item {
-      Item::Struct(item_struct) => collect_from_struct(item_struct, &mut collected)?,
-      Item::Mod(item_mod) => {
-        if let Some((_, inner)) = &mut item_mod.content {
-          process_scope(inner)?;
-        }
-      }
-      Item::Enum(item_enum) => {
-        for variant in &item_enum.variants {
-          reject_duck_on_foreign_fields(variant.fields.iter())?;
-        }
-      }
-      Item::Union(item_union) => {
-        reject_duck_on_foreign_fields(item_union.fields.named.iter())?;
-      }
-      _ => {}
+  let generated = generate(&collected)?;
+  reject_conflicts(items.iter().filter_map(item_ident), &generated)?;
+  items.extend(generated);
+  Ok(())
+}
+
+/// One block scope: collects `#[duck]`-marked structs declared directly inside
+/// `block` and appends the generated traits and impls to the block's own
+/// statements, so they stay visible exactly where the struct is declared.
+///
+/// Every block in Rust (function bodies, closures, `unsafe`/`async`/`const`
+/// blocks, loop/`if`/`match` branch blocks, method bodies) is a scope of its
+/// own; nested blocks are processed recursively the same way.
+fn process_block(block: &mut Block) -> syn::Result<()> {
+  let mut collected: Vec<DuckField> = Vec::new();
+  scan_stmts(&mut block.stmts, &mut collected)?;
+
+  let generated = generate(&collected)?;
+  reject_conflicts(block.stmts.iter().filter_map(stmt_ident), &generated)?;
+  // a trailing tail expression (`x` without `;`) must stay last, so insert
+  // right before it
+  let end = match block.stmts.last() {
+    Some(Stmt::Expr(_, None)) => block.stmts.len() - 1,
+    _ => block.stmts.len(),
+  };
+  block.stmts.splice(end..end, generated.into_iter().map(Stmt::Item));
+  Ok(())
+}
+
+/// Walks `items`, collecting `#[duck]`-marked fields into `collected` while
+/// handing every nested scope (inline modules, function bodies and any other
+/// block) to its own processing.
+fn scan_items(items: &mut [Item], collected: &mut Vec<DuckField>) -> syn::Result<()> {
+  let mut err = None;
+  {
+    let mut scanner = ScopeScanner { collected, err: &mut err };
+    for item in items.iter_mut() {
+      scanner.visit_item_mut(item);
+    }
+  }
+  if let Some(err) = err {
+    return Err(err);
+  }
+  Ok(())
+}
+
+/// Same as [`scan_items`] for the statement list of one block scope.
+fn scan_stmts(stmts: &mut [Stmt], collected: &mut Vec<DuckField>) -> syn::Result<()> {
+  let mut err = None;
+  {
+    let mut scanner = ScopeScanner { collected, err: &mut err };
+    for stmt in stmts.iter_mut() {
+      scanner.visit_stmt_mut(stmt);
+    }
+  }
+  if let Some(err) = err {
+    return Err(err);
+  }
+  Ok(())
+}
+
+/// `syn::visit_mut` walker that collects `#[duck]`-marked struct fields into
+/// `collected`. Inline modules, function bodies and every other block are
+/// delegated to [`process_scope`] / [`process_block`] as scopes of their own
+/// and are *not* traversed again from here.
+struct ScopeScanner<'a> {
+  collected: &'a mut Vec<DuckField>,
+  err: &'a mut Option<syn::Error>,
+}
+
+impl ScopeScanner<'_> {
+  /// Stores the first error; traversal keeps running but does no further work.
+  fn record(&mut self, result: syn::Result<()>) {
+    if self.err.is_none()
+      && let Err(err) = result
+    {
+      *self.err = Some(err);
+    }
+  }
+}
+
+impl VisitMut for ScopeScanner<'_> {
+  fn visit_item_struct_mut(&mut self, node: &mut ItemStruct) {
+    if self.err.is_some() {
+      return;
+    }
+    let result = collect_from_struct(node, self.collected);
+    self.record(result);
+    // struct bodies hold no block scopes, so there is nothing to descend into
+  }
+
+  fn visit_item_enum_mut(&mut self, node: &mut ItemEnum) {
+    if self.err.is_some() {
+      return;
+    }
+    for variant in &node.variants {
+      let result = reject_duck_on_foreign_fields(variant.fields.iter());
+      self.record(result);
     }
   }
 
-  let generated = generate(&collected)?;
-  reject_conflicts(items, &generated)?;
-  items.extend(generated);
-  Ok(())
+  fn visit_item_union_mut(&mut self, node: &mut ItemUnion) {
+    if self.err.is_some() {
+      return;
+    }
+    let result = reject_duck_on_foreign_fields(node.fields.named.iter());
+    self.record(result);
+  }
+
+  fn visit_item_mod_mut(&mut self, node: &mut ItemMod) {
+    if self.err.is_some() {
+      return;
+    }
+    if let Some((_, inner)) = &mut node.content {
+      let result = process_scope(inner);
+      self.record(result);
+      // the inline module is a scope of its own; do not descend again
+    }
+    // file-based modules have no token content to scan
+  }
+
+  fn visit_block_mut(&mut self, node: &mut Block) {
+    if self.err.is_some() {
+      return;
+    }
+    let result = process_block(node);
+    self.record(result);
+    // `process_block` covered everything inside; do not descend again
+  }
 }
 
 fn collect_from_struct(item_struct: &mut ItemStruct, out: &mut Vec<DuckField>) -> syn::Result<()> {
@@ -442,12 +573,13 @@ fn method_base(field_ident: &Ident) -> String {
   }
 }
 
-fn reject_conflicts(existing: &[Item], generated: &[Item]) -> syn::Result<()> {
+fn reject_conflicts<'a>(
+  existing: impl IntoIterator<Item = &'a Ident>,
+  generated: &[Item],
+) -> syn::Result<()> {
   let generated_names: Vec<&Ident> = generated.iter().filter_map(item_ident).collect();
-  for item in existing {
-    if let Some(ident) = item_ident(item)
-      && generated_names.iter().any(|name| **name == *ident)
-    {
+  for ident in existing {
+    if generated_names.iter().any(|name| **name == *ident) {
       return Err(syn::Error::new(
         ident.span(),
         format!(
@@ -458,6 +590,13 @@ fn reject_conflicts(existing: &[Item], generated: &[Item]) -> syn::Result<()> {
     }
   }
   Ok(())
+}
+
+fn stmt_ident(stmt: &Stmt) -> Option<&Ident> {
+  match stmt {
+    Stmt::Item(item) => item_ident(item),
+    _ => None,
+  }
 }
 
 fn item_ident(item: &Item) -> Option<&Ident> {
