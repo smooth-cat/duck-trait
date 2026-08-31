@@ -1,0 +1,10 @@
+[package]
+name = "verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "verification project for duck-trait"
+
+[dependencies]
+duck-trait = { path = "../duck-trait" }

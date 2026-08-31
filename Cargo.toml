@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/duck-trait", "crates/verify"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[profile.dev]
+debug = 0
