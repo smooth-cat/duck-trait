@@ -33,7 +33,7 @@ impl Get for B {
 }
 /*----------------- Only then can you use -----------------*/
 impl Opr for A;
-impl Opr for B;
+impl Opr for B; 
 ```
 
 ### Basic usage
@@ -41,7 +41,7 @@ impl Opr for B;
 ```rust
 use duck_trait::ducks;
 
-/*-------- Generates traits and impls; code stays in scope --------*/
+/*-------- Generates traits and impls; code stays in top scope --------*/
 ducks! { 
   pub struct A {
     // Marks the field to generate accessors for.
