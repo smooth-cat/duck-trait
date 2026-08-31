@@ -1,8 +1,9 @@
 //! `duck-trait` — stop repeating `get`/`set`/`get_mut` declarations in traits.
 //!
-//! Mark fields with `#[duck]` inside a scope wrapped in `ducks! { .. }` (or
-//! annotated with `#[duck_mod]`), and the macros generate one accessor trait per
-//! field name together with the impls for every marked struct:
+//! Mark struct fields with `#[duck]` (public) or `#[_duck]` (private) inside a
+//! scope wrapped in `ducks! { .. }` (or annotated with `#[duck_mod]`), and the
+//! macros generate one accessor trait per field name together with the impls
+//! for every marked struct:
 //!
 //! ```rust
 //! use duck_trait::ducks;
@@ -50,18 +51,126 @@
 //! assert_eq!(b.my_get(), "hi");
 //! ```
 //!
-//! ## The `#[duck_mod]` attribute form
+//! ## Trait visibility
 //!
-//! `ducks!` places items directly into the enclosing scope and is the
-//! recommended entry point. `#[duck_mod]` is the equivalent attribute form for
-//! an inline module, keeping the generated traits inside the module's
-//! namespace:
+//! `#[duck]` defaults to a `pub(crate)` accessor trait — usable anywhere in
+//! the crate. `#[_duck]` keeps the trait private to the declaring scope, and
+//! `#[duck(pub)]` / `#[duck(pub = ..)]` widen or restrict it on demand:
+//!
+//! | Marker                              | Generated trait visibility     |
+//! | ----------------------------------- | ------------------------------ |
+//! | `#[duck]`                           | `pub(crate)` (default)         |
+//! | `#[duck(pub)]`                      | `pub`                          |
+//! | `#[duck(pub = crate)]`              | `pub(crate)`                   |
+//! | `#[duck(pub = super)]`              | `pub(super)`                   |
+//! | `#[duck(pub = self)]`               | `pub(self)`                    |
+//! | `#[duck(pub = crate::foo)]`         | `pub(in crate::foo)`           |
+//! | `#[_duck]`                          | private to the declaring scope |
+//!
+//! The visibility item may sit anywhere in the argument list, next to custom
+//! trait paths: `#[duck(MyValue<_>, pub = super)]`. Because the default trait
+//! is `pub(crate)`, in-crate callers can use it across module boundaries:
 //!
 //! ```rust
 //! use duck_trait::duck_mod;
 //!
 //! #[duck_mod]
 //! mod model {
+//!     pub struct Player {
+//!         #[duck] // generates: pub(crate) trait _Name<T>
+//!         name: String,
+//!     }
+//!
+//!     pub fn make() -> Player {
+//!         Player { name: "duck".to_owned() }
+//!     }
+//! }
+//!
+//! // the pub(crate) trait is reachable from any other module of the crate
+//! fn shout(player: &impl model::_Name<String>) {
+//!     println!("{}", player.name());
+//! }
+//!
+//! shout(&model::make());
+//! ```
+//!
+//! Rules enforced at compile time:
+//!
+//! - All structs sharing one trait must declare the same visibility:
+//!
+//! ```compile_fail
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     pub struct A {
+//!         #[duck(pub)]
+//!         value: String,
+//!     }
+//!
+//!     struct B {
+//!         #[duck] // error: `pub` vs `pub(crate)` for the shared `_Value` trait
+//!         value: String,
+//!     }
+//! }
+//! ```
+//!
+//! - Block scopes (function bodies, closures, ...) cannot carry visibility
+//!   qualifiers, so they only accept `#[_duck]`:
+//!
+//! ```compile_fail
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     fn make() -> u8 {
+//!         struct Local {
+//!             #[duck] // error: use `#[_duck]` inside a block scope
+//!             v: u8,
+//!         }
+//!         0
+//!     }
+//! }
+//! ```
+//!
+//! - `#[_duck]` always generates a private trait and rejects `pub` items:
+//!
+//! ```compile_fail
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     struct A {
+//!         #[_duck(pub)] // error: `#[_duck]` generates a private trait
+//!         value: String,
+//!     }
+//! }
+//! ```
+//!
+//! - A `#[duck(..)]` list accepts at most one visibility item:
+//!
+//! ```compile_fail
+//! use duck_trait::ducks;
+//!
+//! ducks! {
+//!     struct A {
+//!         #[duck(pub, pub = crate)] // error: at most one `pub` item
+//!         value: String,
+//!     }
+//! }
+//! ```
+//!
+//! ## The `#[duck_mod]` attribute form
+//!
+//! `ducks!` places items directly into the enclosing scope and is the
+//! recommended entry point. `#[duck_mod]` is the equivalent attribute form for
+//! an inline module; the generated traits live in the module's namespace
+//! (defaulting to `pub(crate)`, see [Trait visibility](#trait-visibility)):
+//!
+//! ```rust
+//! use duck_trait::duck_mod;
+//!
+//! #[duck_mod]
+//! mod model {
+//!     #![allow(private_bounds)]
+//!
 //!     pub struct Player {
 //!         #[duck]
 //!         name: String,
@@ -92,7 +201,8 @@
 //!
 //! Structs declared inside function bodies — or any other block: closures,
 //! loops, match arms, method bodies — get their traits generated in that same
-//! block, so every scope keeps a private set:
+//! block. Items in a block cannot carry visibility qualifiers, so these
+//! scopes only accept the private `#[_duck]` marker:
 //!
 //! ```rust
 //! use duck_trait::ducks;
@@ -100,7 +210,7 @@
 //! ducks! {
 //!     fn make() -> u8 {
 //!         struct Local {
-//!             #[duck]
+//!             #[_duck]
 //!             v: u8,
 //!         }
 //!         let mut local = Local { v: 1 };
@@ -119,15 +229,15 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
   Attribute, Block, Fields, File, GenericArgument, Generics, Ident, Item, ItemEnum, ItemMod,
-  ItemStruct, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type, parse2,
-  punctuated::Punctuated, visit_mut::VisitMut,
+  ItemStruct, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type, Visibility,
+  parse::ParseStream, parse2, visit_mut::VisitMut,
 };
 
 /// Attribute form: `#[duck_mod] mod name { .. }`.
 ///
 /// Scans the module (recursively into nested inline modules) for struct fields
-/// marked with `#[duck]`, strips the markers and generates the accessor traits
-/// plus their impls into each scope.
+/// marked with `#[duck]`/`#[_duck]`, strips the markers and generates the
+/// accessor traits plus their impls into each scope.
 #[proc_macro_attribute]
 pub fn duck_mod(attr: TokenStream, item: TokenStream) -> TokenStream {
   expand_attr(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
@@ -151,6 +261,21 @@ pub fn duck(_attr: TokenStream, item: TokenStream) -> TokenStream {
   syn::Error::new_spanned(
     TokenStream2::from(item),
     "`#[duck]` must be applied to a named struct field inside a scope \
+         annotated with `#[duck_mod]` or wrapped in `ducks! { .. }`",
+  )
+  .into_compile_error()
+  .into()
+}
+
+/// Private-marker stub. `#[_duck]` is consumed (stripped) by
+/// `#[duck_mod]`/`ducks!` before the compiler ever resolves it, so this macro
+/// only runs when the private marker is used outside a duck_mod scope, or on
+/// something other than a struct field.
+#[proc_macro_attribute]
+pub fn _duck(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  syn::Error::new_spanned(
+    TokenStream2::from(item),
+    "`#[_duck]` must be applied to a named struct field inside a scope \
          annotated with `#[duck_mod]` or wrapped in `ducks! { .. }`",
   )
   .into_compile_error()
@@ -202,12 +327,15 @@ fn expand_bang(item: TokenStream2) -> syn::Result<TokenStream2> {
 // scope processing
 // ---------------------------------------------------------------------------
 
-/// One `#[duck]`-marked field, waiting to be grouped into a trait.
+/// One `#[duck]`/`#[_duck]`-marked field, waiting to be grouped into a trait.
 struct DuckField {
   struct_ident: Ident,
   generics: Generics,
   field_ident: Ident,
   field_ty: Type,
+  /// Visibility of the generated accessor trait; `Visibility::Inherited` for
+  /// the private `#[_duck]` marker.
+  vis: Visibility,
   /// Trait paths from `#[duck(MyTrait, ..)]` to additionally implement for the
   /// struct.
   custom_impls: Vec<Path>,
@@ -233,6 +361,16 @@ fn process_scope(items: &mut Vec<Item>) -> syn::Result<()> {
 fn process_block(block: &mut Block) -> syn::Result<()> {
   let mut collected: Vec<DuckField> = Vec::new();
   scan_stmts(&mut block.stmts, &mut collected)?;
+
+  // items inside a block cannot carry visibility qualifiers (E0449)
+  if let Some(field) = collected.iter().find(|field| !matches!(field.vis, Visibility::Inherited)) {
+    return Err(syn::Error::new(
+      field.field_ident.span(),
+      "`#[duck]` (or `#[duck(pub ..)]`) cannot be used inside a block scope: \
+       visibility qualifiers are not permitted on the generated trait here; \
+       use `#[_duck]` for a private accessor trait instead",
+    ));
+  }
 
   let generated = generate(&collected)?;
   reject_conflicts(block.stmts.iter().filter_map(stmt_ident), &generated)?;
@@ -352,24 +490,37 @@ fn collect_from_struct(item_struct: &mut ItemStruct, out: &mut Vec<DuckField>) -
   match &mut item_struct.fields {
     Fields::Named(fields_named) => {
       for field in fields_named.named.iter_mut() {
-        let Some(pos) = field.attrs.iter().position(is_duck) else {
+        let duck_pos = field.attrs.iter().position(is_duck);
+        let private_pos = field.attrs.iter().position(is_private_duck);
+        let Some(pos) = duck_pos.or(private_pos) else {
           continue;
         };
+        if duck_pos.is_some() && private_pos.is_some() {
+          return Err(syn::Error::new(
+            field.ident.as_ref().expect("named field has an ident").span(),
+            "a field cannot be marked with both `#[duck]` and `#[_duck]`",
+          ));
+        }
+        let public_marker = duck_pos.is_some();
         let attr = field.attrs.remove(pos);
-        let custom_impls = parse_custom_impls(&attr)?;
+        let (vis, custom_impls) = parse_marker(&attr, public_marker)?;
         out.push(DuckField {
           struct_ident: item_struct.ident.clone(),
           generics: item_struct.generics.clone(),
           field_ident: field.ident.clone().expect("named field has an ident"),
           field_ty: field.ty.clone(),
+          vis,
           custom_impls,
         });
       }
     }
     Fields::Unnamed(_) | Fields::Unit => {
       for field in item_struct.fields.iter() {
-        if let Some(attr) = field.attrs.iter().find(|attr| is_duck(attr)) {
-          return Err(syn::Error::new_spanned(attr, "`#[duck]` only supports named struct fields"));
+        if let Some(attr) = field.attrs.iter().find(|attr| is_duck(attr) || is_private_duck(attr)) {
+          return Err(syn::Error::new_spanned(
+            attr,
+            "`#[duck]`/`#[_duck]` only supports named struct fields",
+          ));
         }
       }
     }
@@ -381,8 +532,11 @@ fn reject_duck_on_foreign_fields<'a>(
   fields: impl IntoIterator<Item = &'a syn::Field>,
 ) -> syn::Result<()> {
   for field in fields {
-    if let Some(attr) = field.attrs.iter().find(|attr| is_duck(attr)) {
-      return Err(syn::Error::new_spanned(attr, "`#[duck]` only supports named struct fields"));
+    if let Some(attr) = field.attrs.iter().find(|attr| is_duck(attr) || is_private_duck(attr)) {
+      return Err(syn::Error::new_spanned(
+        attr,
+        "`#[duck]`/`#[_duck]` only supports named struct fields",
+      ));
     }
   }
   Ok(())
@@ -392,32 +546,121 @@ fn is_duck(attr: &Attribute) -> bool {
   attr.path().is_ident("duck")
 }
 
-/// Extracts the trait paths from a `#[duck]` marker: plain `#[duck]` (no
-/// arguments), or `#[duck(MyTrait, ..)]` whose paths the macro additionally
-/// implements for the marked struct.
-fn parse_custom_impls(attr: &Attribute) -> syn::Result<Vec<Path>> {
+fn is_private_duck(attr: &Attribute) -> bool {
+  attr.path().is_ident("_duck")
+}
+
+/// Trait visibility used when the marker declares none: `#[duck]` defaults to
+/// `pub(crate)`, `#[_duck]` to private.
+fn default_vis(public_marker: bool) -> Visibility {
+  if public_marker {
+    parse2::<Visibility>(quote!(pub(crate))).expect("`pub(crate)` is a valid visibility")
+  } else {
+    Visibility::Inherited
+  }
+}
+
+/// Parses a `#[duck]` / `#[_duck]` field marker into the trait visibility and
+/// the trait paths of the `impl`s to additionally generate.
+///
+/// `#[duck(..)]` items are comma-separated and may appear in any order:
+///
+/// - at most one visibility item: bare `pub` (fully public) or `pub = <value>`
+///   where value is `crate`, `super`, `self` or a path rendered as
+///   `pub(in path)`,
+/// - any number of trait paths, additionally implemented for the struct.
+///
+/// `#[_duck]` always generates a private trait and rejects visibility items.
+fn parse_marker(attr: &Attribute, public_marker: bool) -> syn::Result<(Visibility, Vec<Path>)> {
+  let marker = if public_marker { "`#[duck]`" } else { "`#[_duck]`" };
   match &attr.meta {
-    Meta::Path(_) => Ok(Vec::new()),
+    Meta::Path(_) => Ok((default_vis(public_marker), Vec::new())),
     Meta::NameValue(_) => {
-      Err(syn::Error::new_spanned(attr, "`#[duck]` does not support name-value arguments"))
+      Err(syn::Error::new_spanned(attr, format!("{marker} does not support name-value arguments")))
     }
     Meta::List(_) => {
-      let paths: Punctuated<Path, Token![,]> =
-        attr.parse_args_with(Punctuated::parse_terminated).map_err(|_| {
-          syn::Error::new_spanned(
-            attr,
-            "`#[duck(...)]` expects trait paths, e.g. `#[duck(MyValue<_>)]`",
-          )
-        })?;
-      if paths.is_empty() {
-        return Err(syn::Error::new_spanned(
-          attr,
-          "`#[duck(...)]` requires at least one trait path",
-        ));
-      }
-      Ok(paths.into_iter().collect())
+      let mut vis: Option<Visibility> = None;
+      let mut custom_impls: Vec<Path> = Vec::new();
+      attr.parse_args_with(|input: ParseStream| -> syn::Result<()> {
+        let mut expect_comma = false;
+        while !input.is_empty() {
+          if expect_comma {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+              break; // trailing comma
+            }
+          }
+          expect_comma = true;
+          if input.peek(Token![pub]) {
+            if !public_marker {
+              return Err(input.error(format!(
+                "{marker} always generates a private trait; \
+                 use `#[duck(pub ..)]` for a public accessor trait"
+              )));
+            }
+            if vis.is_some() {
+              return Err(input.error(format!("{marker} accepts at most one `pub` item")));
+            }
+            vis = Some(parse_vis_item(input)?);
+          } else {
+            custom_impls.push(input.parse::<Path>().map_err(|_| {
+              input.error(format!(
+                "{marker} expects `pub` items or trait paths, \
+                 e.g. `#[duck(pub = crate, MyValue<_>)]`"
+              ))
+            })?);
+          }
+        }
+        Ok(())
+      })?;
+      Ok((vis.unwrap_or_else(|| default_vis(public_marker)), custom_impls))
     }
   }
+}
+
+/// Parses one `pub` (fully public) or `pub = <value>` visibility item from a
+/// `#[duck(..)]` argument list.
+fn parse_vis_item(input: ParseStream) -> syn::Result<Visibility> {
+  input.parse::<Token![pub]>()?;
+  if !input.peek(Token![=]) {
+    return Ok(parse2::<Visibility>(quote!(pub)).expect("`pub` is a valid visibility"));
+  }
+  input.parse::<Token![=]>()?;
+
+  // `crate`/`super`/`self` directly followed by `::` starts a path instead
+  let restricted: Option<&str> = if input.peek(Token![crate]) && !input.peek2(Token![::]) {
+    input.parse::<Token![crate]>()?;
+    Some("crate")
+  } else if input.peek(Token![super]) && !input.peek2(Token![::]) {
+    input.parse::<Token![super]>()?;
+    Some("super")
+  } else if input.peek(Token![self]) && !input.peek2(Token![::]) {
+    input.parse::<Token![self]>()?;
+    Some("self")
+  } else {
+    None
+  };
+
+  if let Some(kw) = restricted {
+    let tokens = match kw {
+      "crate" => quote!(pub(crate)),
+      "super" => quote!(pub(super)),
+      _ => quote!(pub(self)),
+    };
+    return Ok(parse2::<Visibility>(tokens).expect("keyword restrictions are valid visibilities"));
+  }
+
+  let path: Path = input.parse()?;
+  let first = path.segments.first().map(|seg| seg.ident.to_string());
+  let valid_in_path =
+    path.leading_colon.is_none() && matches!(first.as_deref(), Some("crate" | "super" | "self"));
+  if !valid_in_path {
+    return Err(input.error(
+      "`pub = <path>` is rendered as `pub(in path)`, whose path \
+       must start with `crate`, `super`, or `self`",
+    ));
+  }
+  Ok(parse2::<Visibility>(quote!(pub(in #path))).expect("keyword-led paths are valid in-paths"))
 }
 
 // ---------------------------------------------------------------------------
@@ -458,9 +701,17 @@ fn fill_placeholders(path: &mut Path, field_ty: &Type) -> syn::Result<()> {
   Ok(())
 }
 
+/// One accessor trait and every field sharing it.
+struct TraitGroup<'a> {
+  base: String,
+  first_field: String,
+  vis: Visibility,
+  fields: Vec<&'a DuckField>,
+}
+
 fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
-  // trait name (without leading `_`) -> (getter method base, fields sharing it)
-  let mut groups: BTreeMap<String, (String, String, Vec<&DuckField>)> = BTreeMap::new();
+  // trait name (without leading `_`) -> grouped fields sharing it
+  let mut groups: BTreeMap<String, TraitGroup> = BTreeMap::new();
   // (struct, rendered trait path) of custom impls already emitted
   let mut emitted_custom: BTreeSet<(String, String)> = BTreeSet::new();
 
@@ -470,27 +721,48 @@ fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
     match groups.entry(trait_name) {
       btree_map::Entry::Occupied(mut occupied) => {
         let trait_name = occupied.key().clone();
-        let (existing_base, existing_field, list) = occupied.get_mut();
-        if *existing_base != base {
+        let group = occupied.get_mut();
+        if group.base != base {
           return Err(syn::Error::new(
             field.field_ident.span(),
             format!(
               "field `{}` and field `{}` produce the same trait `_{}` \
                              but require different method names",
-              field.field_ident, existing_field, trait_name,
+              field.field_ident, group.first_field, trait_name,
             ),
           ));
         }
-        list.push(field);
+        let label = vis_label(&field.vis);
+        if vis_label(&group.vis) != label {
+          return Err(syn::Error::new(
+            field.field_ident.span(),
+            format!(
+              "field `{field}` declares visibility `{label}` for the accessor trait \
+               `_{name}`, but field `{existing}` declares `{existing_label}`; \
+               all fields sharing one trait must declare the same visibility",
+              field = field.field_ident,
+              name = trait_name,
+              existing = group.first_field,
+              existing_label = vis_label(&group.vis),
+            ),
+          ));
+        }
+        group.fields.push(field);
       }
       btree_map::Entry::Vacant(vacant) => {
-        vacant.insert((base, field.field_ident.to_string(), vec![field]));
+        vacant.insert(TraitGroup {
+          base,
+          first_field: field.field_ident.to_string(),
+          vis: field.vis.clone(),
+          fields: vec![field],
+        });
       }
     }
   }
 
   let mut tokens = TokenStream2::new();
-  for (trait_name, (base, _, group)) in groups {
+  for (trait_name, group) in groups {
+    let TraitGroup { base, vis, fields: group, .. } = group;
     let trait_ident = format_ident!("_{}", trait_name);
     // getter keeps the original spelling (raw idents such as `r#type` stay raw)
     let get_ident = &group[0].field_ident;
@@ -498,7 +770,7 @@ fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
     let mut_ident = format_ident!("{}_mut", base);
 
     tokens.extend(quote! {
-        trait #trait_ident<T> {
+        #vis trait #trait_ident<T> {
             fn #get_ident(&self) -> &T;
             fn #set_ident(&mut self, v: T);
             fn #mut_ident(&mut self) -> &mut T;
@@ -541,6 +813,23 @@ fn generate(fields: &[DuckField]) -> syn::Result<Vec<Item>> {
 
   let file: File = parse2(tokens).expect("duck-trait generated syntactically invalid items");
   Ok(file.items)
+}
+
+/// Human-readable visibility rendering for error messages.
+fn vis_label(vis: &Visibility) -> String {
+  match vis {
+    Visibility::Inherited => "private".to_owned(),
+    Visibility::Public(_) => "pub".to_owned(),
+    Visibility::Restricted(restricted) => {
+      let path = &restricted.path;
+      let rendered = quote!(#path).to_string();
+      if restricted.in_token.is_some() {
+        format!("pub(in {rendered})")
+      } else {
+        format!("pub({rendered})")
+      }
+    }
+  }
 }
 
 /// `value` -> `Value`, `my_field` -> `MyField`, `r#type` -> `Type`.

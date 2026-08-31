@@ -79,7 +79,7 @@ ducks! {
   }
 }
 /*----------------- After expansion -----------------*/
-trait _Value<T> {
+pub(crate) trait _Value<T> {
   fn value(&self) -> &T;
   fn value_set(&mut self, v: T);
   fn value_mut(&mut self) -> &mut T;
@@ -138,13 +138,13 @@ pub struct B {
   value: String,
 }
 
-trait MyValue<V>: _Value<V> {
+pub(crate) trait MyValue<V>: _Value<V> {
   fn my_get(&self) -> &V {
     self.value()
   }
 }
 
-trait _Value<T> {
+pub(crate) trait _Value<T> {
   fn value(&self) -> &T;
   fn value_set(&mut self, v: T);
   fn value_mut(&mut self) -> &mut T;
@@ -219,11 +219,60 @@ ducks! {
 | `my_field` | `_MyField<T>`   | `my_field()` / `my_field_set(v)` / …       |
 | `r#type`   | `_Type<T>`      | `r#type()` / `type_set(v)` / `type_mut()`  |
 
-- Trait name: the field name converted to UpperCamelCase with a `_` prefix (the `_` prefix keeps it
-  module-private by default).
+- Trait name: the field name converted to UpperCamelCase with a `_` prefix.
 - Within the same scope, all structs with the same field name share one trait; different scopes each
   generate their own.
 - The setter takes the value by value and returns `()`.
+
+### Trait visibility
+
+The marker chooses the visibility of the generated trait:
+
+| Marker                              | Generated trait visibility     |
+| ----------------------------------- | ------------------------------ |
+| `#[duck]`                           | `pub(crate)` (default)         |
+| `#[duck(pub)]`                      | `pub`                          |
+| `#[duck(pub = crate)]`              | `pub(crate)`                   |
+| `#[duck(pub = super)]`              | `pub(super)`                   |
+| `#[duck(pub = self)]`               | `pub(self)`                    |
+| `#[duck(pub = crate::foo)]`         | `pub(in crate::foo)`           |
+| `#[_duck]`                          | private to the declaring scope |
+
+- `#[duck]` defaults to `pub(crate)` so accessors work across the whole crate without exporting
+  them; `#[duck(pub)]` exports the trait for external users (e.g. as a supertrait of a public
+  trait).
+- The visibility item may sit anywhere in `#[duck(..)]`, next to custom trait paths:
+  `#[duck(MyValue<_>, pub = super)]` — at most one visibility item per marker.
+- Because the default trait is `pub(crate)`, in-crate callers can use it across module boundaries:
+
+```rust
+use duck_trait::duck_mod;
+
+#[duck_mod]
+mod model {
+  pub struct Player {
+    #[duck] // generates: pub(crate) trait _Name<T>
+    name: String,
+  }
+
+  pub fn make() -> Player {
+    Player { name: "duck".to_owned() }
+  }
+}
+
+// the pub(crate) trait is reachable from any other module of the crate
+fn shout(player: &impl model::_Name<String>) {
+  println!("{}", player.name());
+}
+```
+
+- All structs sharing one trait must declare the same visibility; mismatched markers fail to
+  compile.
+- `pub = <path>` is rendered as `pub(in path)`; the path must start with `crate`, `super`, or
+  `self` and must be an ancestor module of the declaring struct.
+- Block scopes (function bodies, closures, ...) cannot carry visibility qualifiers, so they only
+  accept `#[_duck]`.
+- `#[_duck]` always generates a private trait and rejects `pub` items.
 
 ### Supported features and limitations
 
@@ -234,6 +283,8 @@ ducks! {
 - `#[duck(MyTrait(..))]`: in addition to the accessors, automatically implements the custom trait for
   the struct, with the `_` placeholder equal to the field type (supported by both `#[duck_mod]` and
   `ducks!`).
+- Trait visibility: `#[duck]` defaults to `pub(crate)`; `#[duck(pub)]` / `#[duck(pub = ..)]` set
+  `pub` or restricted visibility; `#[_duck]` keeps the trait private (see "Trait visibility").
 - Recursively processes nested inline modules and block scopes: function bodies, closures,
   `unsafe`/`async`/`const` blocks, loop/`if`/`match` branch blocks and method bodies each get their
   own set of traits, generated inside the scope where the struct is declared.
@@ -246,8 +297,9 @@ ducks! {
   Use `ducks! { .. }` inside the file or switch to an inline module.
 - Other macro invocations inside the scope are opaque: structs produced by a sibling macro cannot be
   scanned.
-- The generated traits are private items of the containing module; adjust visibility yourself if you
-  need to use them across modules.
+- Block scopes only accept `#[_duck]`: generated items there cannot carry visibility qualifiers
+  (rustc E0449).
+- All fields sharing one trait must declare the same visibility; mismatched markers fail to compile.
 - If a field name clashes with an existing method (e.g. `clone`), call sites may hit method resolution
   ambiguity — an inherent behavior of Rust trait methods.
 
@@ -273,7 +325,7 @@ Requires Rust 1.85+ (edition 2024).
 ### Attribute form (not recommended❌) `#[duck_mod]`
 
 `#[duck_mod]` is the equivalent attribute-macro form of `ducks!`, applied to an inline module; the
-generated private traits stay inside the module namespace.
+generated traits (defaulting to `pub(crate)`) stay inside the module namespace.
 `ducks! { .. }` is preferred; the following `#[duck_mod]` examples correspond one-to-one with the
 usages shown above.
 
@@ -417,7 +469,7 @@ ducks! {
   }
 }
 /*----------------- 展开后 -----------------*/
-trait _Value<T> {
+pub(crate) trait _Value<T> {
   fn value(&self) -> &T;
   fn value_set(&mut self, v: T);
   fn value_mut(&mut self) -> &mut T;
@@ -478,13 +530,13 @@ pub struct B {
   value: String,
 }
 
-trait MyValue<V>: _Value<V> {
+pub(crate) trait MyValue<V>: _Value<V> {
   fn my_get(&self) -> &V {
     self.value()
   }
 }
 
-trait _Value<T> {
+pub(crate) trait _Value<T> {
   fn value(&self) -> &T;
   fn value_set(&mut self, v: T);
   fn value_mut(&mut self) -> &mut T;
@@ -558,9 +610,56 @@ ducks! {
 | `my_field` | `_MyField<T>` | `my_field()` / `my_field_set(v)` / …        |
 | `r#type`   | `_Type<T>`    | `r#type()` / `type_set(v)` / `type_mut()`   |
 
-- trait 名：字段名转大驼峰并加 `_` 前缀（`_` 前缀使其默认保持模块私有）。
+- trait 名：字段名转大驼峰并加 `_` 前缀。
 - 同一作用域内，相同字段名的所有 struct 共享同一个 trait；不同作用域各自独立生成。
 - setter 接收值并返回 `()`。
+
+### trait 可见性
+
+由标记决定生成 trait 的可见性：
+
+| 标记                                | 生成 trait 的可见性      |
+| ----------------------------------- | ------------------------ |
+| `#[duck]`                           | `pub(crate)`（默认）     |
+| `#[duck(pub)]`                      | `pub`                    |
+| `#[duck(pub = crate)]`              | `pub(crate)`             |
+| `#[duck(pub = super)]`              | `pub(super)`             |
+| `#[duck(pub = self)]`               | `pub(self)`              |
+| `#[duck(pub = crate::foo)]`         | `pub(in crate::foo)`     |
+| `#[_duck]`                          | 私有，仅声明作用域内可见 |
+
+- `#[duck]` 默认生成 `pub(crate)`，访问器在整个 crate 内可用且不会导出到外部；需要给外部使用
+  （如作为公开 trait 的 supertrait）时用 `#[duck(pub)]`。
+- 可见性项在 `#[duck(..)]` 中位置任意，可与自定义 trait path 混排：
+  `#[duck(MyValue<_>, pub = super)]`，但最多写一个。
+- 默认 trait 是 `pub(crate)`，crate 内的跨模块调用方可以直接使用：
+
+```rust
+use duck_trait::duck_mod;
+
+#[duck_mod]
+mod model {
+  pub struct Player {
+    #[duck] // 生成: pub(crate) trait _Name<T>
+    name: String,
+  }
+
+  pub fn make() -> Player {
+    Player { name: "duck".to_owned() }
+  }
+}
+
+// pub(crate) trait 在 crate 内任何其他模块都可用
+fn shout(player: &impl model::_Name<String>) {
+  println!("{}", player.name());
+}
+```
+
+- 共享同一个 trait 的所有 struct 必须声明相同可见性，不一致会编译报错。
+- `pub = <path>` 渲染为 `pub(in path)`；path 必须以 `crate`、`super` 或 `self` 开头，且必须是
+  声明 struct 的祖先模块。
+- 块级作用域（函数体、闭包等）内的 item 不能带可见性修饰符，只接受 `#[_duck]`。
+- `#[_duck]` 永远生成私有 trait，并拒绝 `pub` 项。
 
 ### 支持与限制
 
@@ -570,6 +669,8 @@ ducks! {
   `impl<T: Clone> _Inner<T> for Wrapper<T>`。
 - `#[duck(MyTrait(..))]`：在访问器之外额外为该 struct 自动实现自定义 trait，`_` 占位符等于
   字段类型（`#[duck_mod]` 与 `ducks!` 均支持）。
+- trait 可见性：`#[duck]` 默认 `pub(crate)`；`#[duck(pub)]` / `#[duck(pub = ..)]` 可设为 `pub`
+  或受限可见性；`#[_duck]` 保持私有（见「trait 可见性」）。
 - 递归处理嵌套的内联模块与块级作用域：函数体、闭包、`unsafe`/`async`/`const` 块、
   loop/`if`/`match` 分支块、方法体各自生成一组 trait，且生成在 struct 所在的作用域内。
 - 生成前检测 `_Xxx` 命名冲突，冲突时给出明确的编译错误。
@@ -579,7 +680,8 @@ ducks! {
 - 无法扫描 `mod foo;` 文件模块的内容（rustc 不会把文件内容传给宏）。请在文件内使用
   `ducks! { .. }` 或改用内联模块。
 - 作用域内的其他宏调用是不透明的：兄弟宏生成的 struct 无法被扫描。
-- 生成的 trait 是所在模块的私有项；如需跨模块使用，需要自行调整可见性。
+- 块级作用域只接受 `#[_duck]`：其中生成的 item 不能带可见性修饰符（rustc E0449）。
+- 共享同一个 trait 的所有字段必须声明相同可见性，不一致会编译报错。
 - 字段名若与既有方法重名（如 `clone`），调用处可能出现方法解析歧义，这是 Rust trait 方法的固有行为。
 
 ### 项目结构
@@ -603,7 +705,8 @@ cargo clippy --all-targets        # 静态检查
 
 ### 属性形式（不推荐⭕️） `#[duck_mod]`
 
-`#[duck_mod]` 是 `ducks!` 的等价属性宏形式，作用于内联模块，生成的私有 trait 保持在模块命名空间内。
+`#[duck_mod]` 是 `ducks!` 的等价属性宏形式，作用于内联模块，生成的 trait（默认 `pub(crate)`）
+保持在模块命名空间内。
 推荐优先使用 `ducks! { .. }`；以下 `#[duck_mod]` 示例与前面的用法一一对应。
 
 ```rust

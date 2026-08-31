@@ -1,8 +1,7 @@
 //! Verification project for duck-trait.
 //!
-//! Every fixture scope carries its own `#[cfg(test)]` tests, because the
-//! generated accessor traits are private to the scope that produced them
-//! (matching the README's `trait _Value<T>`).
+//! Every fixture scope carries its own `#[cfg(test)]` tests next to the
+//! structs they exercise; visibility-specific fixtures live at the end.
 
 #![allow(dead_code)]
 
@@ -328,7 +327,7 @@ mod inner_attrs {
 ducks! {
   fn deep_in_ducks_fn() -> u8 {
     struct Local {
-      #[duck]
+      #[_duck]
       v: u8,
     }
     let mut local = Local { v: 1 };
@@ -347,7 +346,7 @@ fn ducks_fn_body_scope() {
 mod fn_scopes {
   pub fn use_local() -> String {
     struct Local {
-      #[duck]
+      #[_duck]
       v: String,
     }
     let mut local = Local { v: String::from("deep") };
@@ -362,7 +361,7 @@ mod fn_scopes {
   impl Outer {
     pub fn deep(&self) -> u8 {
       struct Inner {
-        #[duck]
+        #[_duck]
         v: u8,
       }
       *Inner { v: self.marker + 1 }.v()
@@ -395,7 +394,7 @@ mod fn_scopes {
   #[test]
   fn struct_inside_test_fn() {
     struct InTest {
-      #[duck]
+      #[_duck]
       v: u8,
     }
     let mut t = InTest { v: 1 };
@@ -420,7 +419,7 @@ mod fn_scopes {
   fn structs_in_sibling_block_scopes() {
     {
       struct InBlock {
-        #[duck]
+        #[_duck]
         v: u8,
       }
       let mut b = InBlock { v: 1 };
@@ -430,7 +429,7 @@ mod fn_scopes {
 
     let in_closure = || {
       struct InClosure {
-        #[duck]
+        #[_duck]
         v: u8,
       }
       *InClosure { v: 3 }.v()
@@ -439,12 +438,199 @@ mod fn_scopes {
 
     for _ in 0..1 {
       struct InLoop {
-        #[duck]
+        #[_duck]
         v: u8,
       }
       let mut l = InLoop { v: 4 };
       l.v_set(5);
       assert_eq!(l.v(), &5);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// trait visibility — `#[duck]` defaults to pub(crate), levels via `pub = ..`
+// ---------------------------------------------------------------------------
+
+#[duck_mod]
+mod vis_default {
+  pub struct CrateVisible {
+    #[duck] // generates: pub(crate) trait _Value<T>
+    value: u8,
+  }
+
+  pub fn make() -> CrateVisible {
+    CrateVisible { value: 1 }
+  }
+}
+
+// the default pub(crate) trait is usable from a sibling module
+fn crate_visible_value(x: &impl vis_default::_Value<u8>) -> &u8 {
+  x.value()
+}
+
+#[cfg(test)]
+#[test]
+fn default_vis_reaches_sibling_module() {
+  assert_eq!(crate_visible_value(&vis_default::make()), &1);
+}
+
+#[duck_mod]
+mod vis_pub {
+  pub struct FullyPublic {
+    #[duck(pub)] // generates: pub trait _Value<T>
+    value: String,
+  }
+
+  pub fn make() -> FullyPublic {
+    FullyPublic { value: String::from("duck") }
+  }
+}
+
+#[cfg(test)]
+#[test]
+fn full_pub_vis() {
+  use vis_pub::_Value;
+
+  let mut f = vis_pub::make();
+  f.value_set(String::from("goose"));
+  assert_eq!(f.value(), "goose");
+}
+
+#[duck_mod]
+mod vis_root {
+  // the module the restricted trait is published *to* — it must be an
+  // ancestor of the module declaring the struct (E0742)
+  pub mod vis_in {
+    use self::deep::_V;
+
+    pub fn use_restricted(h: &deep::Restricted) -> &u8 {
+      h.v()
+    }
+
+    pub mod deep {
+      pub struct Restricted {
+        // generates: pub(in crate::vis_root::vis_in) trait _V<T>
+        #[duck(pub = crate::vis_root::vis_in)]
+        v: u8,
+      }
+
+      pub fn make() -> Restricted {
+        Restricted { v: 1 }
+      }
+    }
+  }
+}
+
+#[cfg(test)]
+#[test]
+fn in_path_vis_reaches_target_module() {
+  assert_eq!(vis_root::vis_in::use_restricted(&vis_root::vis_in::deep::make()), &1);
+}
+
+#[duck_mod]
+mod vis_super_outer {
+  pub mod inner {
+    pub struct SuperVisible {
+      #[duck(pub = super)] // generates: pub(super) trait _V<T>
+      v: u8,
+    }
+
+    pub fn make() -> SuperVisible {
+      SuperVisible { v: 1 }
+    }
+  }
+
+  // `pub = super` makes the trait visible in `vis_super_outer`
+  #[cfg(test)]
+  #[test]
+  fn super_vis_reaches_parent_module() {
+    use self::inner::_V;
+
+    let mut s = inner::make();
+    s.v_set(2);
+    assert_eq!(s.v(), &2);
+  }
+}
+
+// visibility item and custom trait path mix freely, in any order
+#[duck_mod]
+mod vis_mixed_outer {
+  pub mod inner {
+    pub struct Mixed {
+      // pub(super) trait _Value<T> + auto impl MyValue<String>
+      #[duck(MyValue<_>, pub = super)]
+      value: String,
+    }
+
+    pub(super) trait MyValue<T>: _Value<T> {
+      fn my_get(&self) -> &T {
+        self.value()
+      }
+    }
+
+    pub fn make() -> Mixed {
+      Mixed { value: String::from("duck") }
+    }
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn mixed_vis_and_custom_impl() {
+    use self::inner::{_Value, MyValue};
+
+    let mut m = inner::make();
+    assert_eq!(m.my_get(), "duck");
+    m.value_set(String::from("goose"));
+    assert_eq!(m.value(), "goose");
+  }
+}
+
+// `#[_duck]` keeps the trait private even at module level
+#[duck_mod]
+mod vis_private {
+  pub struct Hidden {
+    #[_duck]
+    v: u8,
+  }
+
+  pub fn make() -> Hidden {
+    Hidden { v: 1 }
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn private_trait_usable_in_scope() {
+    let mut h = make();
+    h.v_set(2);
+    assert_eq!(h.v(), &2);
+  }
+}
+
+// keyword levels: `pub = crate` (explicit default) and `pub = self`
+#[duck_mod]
+mod vis_kw {
+  pub struct KwCrate {
+    #[duck(pub = crate)] // pub(crate) — same as the default, written out
+    v: u8,
+  }
+
+  pub struct KwSelf {
+    #[duck(pub = self)] // pub(self) — visible in `vis_kw` only
+    w: u8,
+  }
+
+  pub fn make() -> (KwCrate, KwSelf) {
+    (KwCrate { v: 1 }, KwSelf { w: 2 })
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn keyword_levels() {
+    let (mut c, mut s) = make();
+    c.v_set(2);
+    s.w_set(3);
+    assert_eq!(c.v(), &2);
+    assert_eq!(s.w(), &3);
   }
 }
