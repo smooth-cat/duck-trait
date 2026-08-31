@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      current: ${{ steps.bump.outputs.current }}
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compute next version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          current="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "duck-trait") | .version')"
+          IFS='.' read -r major minor patch <<< "$current"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          version="$major.$minor.$patch"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Bump $current -> $version ($BUMP)"
+      - name: Apply version bump
+        env:
+          OLD: ${{ steps.bump.outputs.current }}
+          NEW: ${{ steps.bump.outputs.version }}
+        run: |
+          perl -pi -e 's/^version = "\Q$ENV{OLD}\E"$/version = "$ENV{NEW}"/' Cargo.toml
+          grep -n '^version' Cargo.toml
+          cargo update -w
+      - name: Test
+        run: cargo test --workspace
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish to crates.io
+        run: cargo publish -p duck-trait
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  release-commit:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply version bump
+        env:
+          OLD: ${{ needs.publish.outputs.current }}
+          NEW: ${{ needs.publish.outputs.version }}
+        run: |
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          perl -pi -e 's/^version = "\Q$ENV{OLD}\E"$/version = "$ENV{NEW}"/' Cargo.toml
+          cargo update -w
+      - name: Commit and tag release
+        env:
+          NEW: ${{ needs.publish.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "release: v$NEW"
+          git tag -a "v$NEW" -m "release: v$NEW"
+          git push origin "HEAD:$GITHUB_REF_NAME" "v$NEW"
