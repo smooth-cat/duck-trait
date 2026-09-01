@@ -4,7 +4,7 @@
 
 ## English
 
-### Eliminates the  repetitive get / set code in trait
+### Eliminates repetitive get / set code in trait as below :
 
 ```rust
 struct A { value: i32 }
@@ -42,6 +42,7 @@ impl Opr for B;
 use duck_trait::ducks;
 
 /*-------- Generates traits and impls; code stays in top scope --------*/
+// ducks! can contain multiple structs or other code
 ducks! { 
   pub struct A {
     // Marks the field to generate accessors for.
@@ -49,27 +50,27 @@ ducks! {
     #[duck] 
     value: String,
   }
+}
 
-  // Convention: the field `xxx` generates the "_Xxx<T>" trait
-  trait Opr: _Value<String> {
-    fn print_val(&self) {
-      // Read &xxx via xxx(), this case xxx is value
-      println!("{}", self.value());         
-    }
-    
-    fn set_good(&mut self) {
-      // Set xxx via xxx_set(_)
-      self.value_set(String::from("good")); 
-    }
-    
-    fn get_mut_val(&mut self) -> &str {
-      // Get &mut xxx via xxx_mut()
-      self.value_mut()                      
-    }
+// Convention: the field `xxx` generates the "_Xxx<T>" trait
+trait Opr: _Value<String> {
+  fn print_val(&self) {
+    // Read &xxx via xxx(), this case xxx is value
+    println!("{}", self.value());         
   }
 
-  impl Opr for A {}
+  fn set_good(&mut self) {
+    // Set xxx via xxx_set(_)
+    self.value_set(String::from("good")); 
+  }
+
+  fn get_mut_val(&mut self) -> &str {
+    // Get &mut xxx via xxx_mut()
+    self.value_mut()                      
+  }
 }
+
+impl Opr for A {}
 ```
 
 ### Before / after expansion of `ducks! { .. }`
@@ -187,23 +188,23 @@ ducks! {
     #[duck(MyValue<_>)] 
     value: String,
   }
-
-  // The custom trait binds to the field type
-  // via `_Value<some_type>`
-  trait MyValue<V>: _Value<V> {
-    // In Rust, a method cannot share its name
-    // with the supertrait (_Value);
-    // so just pick a nice name yourself
-    fn my_get(&self) -> &V {
-      // Put your extra logic here
-      self.value()
-    }
-  }
-  
-  let b = B { value: String::from("good") };
-  b.my_get();
-  b.value(); // Still works
 }
+// The custom trait binds to the field type
+// via `_Value<some_type>`
+trait MyValue<V>: _Value<V> {
+  // In Rust, a method cannot share its name
+  // with the supertrait (_Value);
+  // so just pick a nice name yourself
+  fn my_get(&self) -> &V {
+    // Put your extra logic here
+    self.value()
+  }
+}
+
+let b = B { value: String::from("good") };
+b.my_get();
+b.value(); // Still works
+
 /*----------------- After expansion -----------------*/
 pub struct B {
   value: String,
@@ -420,7 +421,7 @@ mod model {
 
 ## 中文
 
-### 消除 trait 中重复的 get / set 代码
+### 消除如下 trait 中重复的 get / set 代码
 
 ```rust
 struct A { value: i32 }
@@ -458,6 +459,7 @@ impl Opr for B;
 use duck_trait::ducks;
 
 /*----------------- 生成 trait 与 impl，代码仍在顶级作用域 -----------------*/
+// ducks! 内可以放多个 struct 或 其他代码
 ducks! { 
   pub struct A {
     // 标记要生成访问器的字段；
@@ -465,27 +467,26 @@ ducks! {
     #[duck]
     value: String,
   }
-
-  // 约定：自动为字段 xxx 生成 “_Xxx<T>” trait
-  trait Opr: _Value<String> {
-    fn print_val(&self) {
-      // 通过 xxx() 获取 &xxx 此处为 &value
-      println!("{}", self.value());         
-    }
-    
-    fn set_good(&mut self) {
-      // 通过 xxx_set(_) 设置值
-      self.value_set(String::from("good")); 
-    }
-    
-    fn get_mut_val(&mut self) -> &str {
-      // 通过 xxx_mut() 获取 &mut xxx
-      self.value_mut()                      
-    }
+}
+// 约定：自动为字段 xxx 生成 “_Xxx<T>” trait
+trait Opr: _Value<String> {
+  fn print_val(&self) {
+    // 通过 xxx() 获取 &xxx 此处为 &value
+    println!("{}", self.value());         
   }
 
-  impl Opr for A {}
+  fn set_good(&mut self) {
+    // 通过 xxx_set(_) 设置值
+    self.value_set(String::from("good")); 
+  }
+
+  fn get_mut_val(&mut self) -> &str {
+    // 通过 xxx_mut() 获取 &mut xxx
+    self.value_mut()                      
+  }
 }
+
+impl Opr for A {}
 ```
 
 ### `ducks! { .. }` 展开前后对比
@@ -602,21 +603,21 @@ ducks! {
     #[duck(MyValue<_>)] 
     value: String,
   }
-
-  // 自定义 trait 通过 _Value<some_type> 绑定到字段类型
-  trait MyValue<V>: _Value<V> {
-    // rust 中你不能声明与 supertrait 即 _Value 同名的函数，
-    // 所以自己取个好听的名字即可
-    fn my_get(&self) -> &V {
-      // 这里写你的额外逻辑
-      self.value()
-    }
-  }
-  
-  let b = B { value: String::from("good") };
-  b.my_get();
-  b.value(); // 依然可以工作
 }
+// 自定义 trait 通过 _Value<some_type> 绑定到字段类型
+trait MyValue<V>: _Value<V> {
+  // rust 中你不能声明与 supertrait 即 _Value 同名的函数，
+  // 所以自己取个好听的名字即可
+  fn my_get(&self) -> &V {
+    // 这里写你的额外逻辑
+    self.value()
+  }
+}
+
+let b = B { value: String::from("good") };
+b.my_get();
+b.value(); // 依然可以工作
+
 /*----------------- 展开后 -----------------*/
 pub struct B {
   value: String,
