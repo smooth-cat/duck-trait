@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use duck_trait::{duck, duck_mod, ducks, props};
+use duck_trait::{duck, duck_mod, ducks, ducky, props};
 
 // ---------------------------------------------------------------------------
 // README usage examples — `ducks!` form (recommended)
@@ -849,4 +849,116 @@ fn props_visibility_follows_trait() {
   use props_vis::PublicProps;
 
   assert_eq!(props_vis::Holder { v: 2 }.doubled(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// `#[ducky]` — brace-less `#[duck(_Show)]` inside a module scope
+// ---------------------------------------------------------------------------
+
+#[ducky]
+mod ducky_flow {
+  // `props`/`duck` markers are consumed by `#[ducky]`, no import needed
+  #[props(name: String, score: i32)]
+  pub trait Show {
+    fn show(&self) -> String {
+      format!("{}: {}", self.name(), self.score())
+    }
+  }
+
+  // props derived from `Show`; extra fields are fine
+  #[duck(_Show)]
+  pub struct Player {
+    name: String,
+    score: i32,
+    nickname: String,
+  }
+
+  impl Show for Player {}
+
+  // explicit generic arguments, props still derived
+  #[props(inner: T)]
+  pub trait Has<T> {
+    fn get(&self) -> &T {
+      self.inner()
+    }
+  }
+
+  #[duck(_Has<String>)]
+  pub struct Box2 {
+    inner: String,
+  }
+
+  impl Has<String> for Box2 {}
+
+  // generic structs infer `impl<T> _Has<T> for W<T>` from the field types
+  #[duck(_Has)]
+  pub struct W<T> {
+    inner: T,
+  }
+
+  impl<T> Has<T> for W<T> {}
+
+  // mixed entries: explicit props list + brace-less
+  #[props(a: u8)]
+  pub trait HasA {
+    fn get_a(&self) -> u8 {
+      *self.a()
+    }
+  }
+
+  #[duck(_HasA{a}, _Has)]
+  pub struct Mixed<T> {
+    a: u8,
+    inner: T,
+  }
+
+  impl<T> Has<T> for Mixed<T> {}
+  impl<T> HasA for Mixed<T> {}
+
+  #[cfg(test)]
+  #[test]
+  fn brace_less_entries() {
+    let mut p = Player { name: String::from("neo"), score: 1, nickname: String::from("the one") };
+    assert_eq!(p.show(), "neo: 1");
+    p.name_set(String::from("trinity"));
+    assert_eq!(p.show(), "trinity: 1");
+
+    let mut b = Box2 { inner: String::from("duck") };
+    assert_eq!(*b.get(), "duck");
+    b.inner_set(String::from("goose"));
+    assert_eq!(*b.get(), "goose");
+
+    let mut w = W { inner: 7 };
+    *w.inner_mut() += 35;
+    assert_eq!(*w.get(), 42);
+
+    let m = Mixed { a: 3, inner: "duck" };
+    assert_eq!(m.get_a(), 3);
+    assert_eq!(*m.get(), "duck");
+  }
+
+  #[props(v: u8)]
+  pub trait HasV {
+    fn doubled(&self) -> u8 {
+      *self.v() * 2
+    }
+  }
+
+  // nested modules see the enclosing scopes' registered traits
+  pub mod nested {
+    #[duck(_HasV)]
+    pub struct Deep {
+      v: u8,
+    }
+
+    impl super::HasV for Deep {}
+
+    #[cfg(test)]
+    #[test]
+    fn deep_sees_parent_traits() {
+      use super::HasV;
+
+      assert_eq!(Deep { v: 2 }.doubled(), 4);
+    }
+  }
 }

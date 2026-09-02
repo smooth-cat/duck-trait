@@ -334,6 +334,82 @@ impl _Show for Player {
 - The old field-marker flow is untouched; both flows can be mixed freely, even inside one
   `ducks!` / `#[duck_mod]` scope.
 
+### `#[ducky]`: brace-less entries in a module scope
+
+Inside a `#[ducky]` module, `#[props]` traits are registered, so struct-level `#[duck(_Show)]`
+entries may omit the props list — it is derived from the registered trait and the struct's own
+fields. Generic arguments are inferred while every prop is a bare generic parameter (`inner: T`);
+otherwise write them explicitly: `#[duck(_Has<String>)]`. The `#[props]` / `#[duck]` markers are
+consumed by `#[ducky]` itself, so no import is needed inside the module.
+
+```rust
+use duck_trait::ducky;
+
+#[ducky]
+mod duckied {
+  #[props(name: String, score: i32)]
+  pub trait Show {
+    fn show(&self) {
+      println!("{}: {}", self.name(), self.score());
+    }
+  }
+
+  // props derived from `Show`; extra fields are fine
+  #[duck(_Show)]
+  pub struct Player {
+    pub name: String,
+    pub score: i32,
+  }
+
+  impl Show for Player {}
+}
+
+use duckied::{Player, Show};
+
+Player { name: "duck".to_owned(), score: 7 }.show();
+```
+
+Generic arguments may be written explicitly (their count is checked against the registered trait)
+or are inferred for generic structs:
+
+```rust
+use duck_trait::ducky;
+
+#[ducky]
+mod duckied {
+  #[props(inner: T)]
+  pub trait Has<T> {
+    fn get(&self) -> &T {
+      self.inner()
+    }
+  }
+
+  // generic arguments written explicitly; props still derived
+  #[duck(_Has<String>)]
+  pub struct Wrapper {
+    inner: String,
+  }
+
+  impl Has<String> for Wrapper {}
+
+  // generic structs infer `impl<T> _Has<T> for W<T>`
+  #[duck(_Has)]
+  pub struct W<T> {
+    inner: T,
+  }
+
+  impl<T> Has<T> for W<T> {}
+}
+```
+
+- Traits registered in enclosing `#[ducky]` scopes are visible to nested modules.
+- Entries with an explicit props list (`#[duck(_Show{name, ..})]`) keep the standalone semantics.
+- Entries referencing a trait outside every enclosing `#[ducky]` scope need the explicit props list.
+- Field-level `#[duck]` / `#[_duck]` markers are not touched inside `#[ducky]`: the old flow belongs
+  to `#[duck_mod]` / `ducks!`.
+- Inference covers props declared as a bare generic parameter; compound types (`items: Vec<T>`) and
+  parameters not used as a bare prop type require the explicit form.
+
 ### Duplicate field names reuse the same trait
 
 ```rust
@@ -388,6 +464,8 @@ ducks! {
 - Detects `_Xxx` naming conflicts before generation and emits a clear compile error on conflict.
 - `#[props(..)]` / `#[duck(_Show{..})]`: trait-first shadow traits, see "Props: write the trait
   first".
+- `#[ducky]`: module scope where `#[duck(_Show)]` may omit the props list, see
+  "`#[ducky]`: brace-less entries in a module scope".
 
 **Limitations**
 - The auto impl of `#[duck(MyTrait(..))]` requires every method of the custom trait to have a default
@@ -407,7 +485,7 @@ ducks! {
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # Publishable proc-macro crate (duck_mod / ducks / duck / props)
+│   ├── duck-trait    # Publishable proc-macro crate (duck_mod / ducks / duck / props / ducky)
 │   └── verify        # Verification project (fixtures + tests)
 └── readme.md
 ```
@@ -817,6 +895,80 @@ impl _Show for Player {
 - 旧字段标记方案完全不变；两种方案可以自由混用，甚至可以在同一个 `ducks!` / `#[duck_mod]`
   作用域内混用。
 
+### `#[ducky]`：模块作用域内的免花括号写法
+
+在 `#[ducky]` 模块内，`#[props]` trait 会被展开并注册，struct 级 `#[duck(_Show)]` 条目可以省略
+props 列表——由注册的 trait 与 struct 自身字段自动推导。泛型参数在"prop 类型是裸泛型参数
+（`inner: T`）"时自动填充，否则需显式写出：`#[duck(_Has<String>)]`。`#[props]` / `#[duck]`
+标记由 `#[ducky]` 自行消费，模块内无需导入。
+
+```rust
+use duck_trait::ducky;
+
+#[ducky]
+mod duckied {
+  #[props(name: String, score: i32)]
+  pub trait Show {
+    fn show(&self) {
+      println!("{}: {}", self.name(), self.score());
+    }
+  }
+
+  // props 从 Show 推导；多出的字段不受影响
+  #[duck(_Show)]
+  pub struct Player {
+    pub name: String,
+    pub score: i32,
+  }
+
+  impl Show for Player {}
+}
+
+use duckied::{Player, Show};
+
+Player { name: "duck".to_owned(), score: 7 }.show();
+```
+
+泛型参数可以显式写出（个数会与注册的 trait 校验），泛型 struct 则自动推导：
+
+```rust
+use duck_trait::ducky;
+
+#[ducky]
+mod duckied {
+  #[props(inner: T)]
+  pub trait Has<T> {
+    fn get(&self) -> &T {
+      self.inner()
+    }
+  }
+
+  // 泛型参数显式写出；props 仍然自动推导
+  #[duck(_Has<String>)]
+  pub struct Wrapper {
+    inner: String,
+  }
+
+  impl Has<String> for Wrapper {}
+
+  // 泛型 struct 自动推导出 `impl<T> _Has<T> for W<T>`
+  #[duck(_Has)]
+  pub struct W<T> {
+    inner: T,
+  }
+
+  impl<T> Has<T> for W<T> {}
+}
+```
+
+- 嵌套模块可以看到外层 `#[ducky]` 作用域注册的 trait。
+- 显式列出 props 的条目（`#[duck(_Show{name, ..})]`）保持独立使用时的语义。
+- 引用的 trait 不在任何外层 `#[ducky]` 作用域内时，需要写显式 props 列表。
+- 字段级 `#[duck]` / `#[_duck]` 标记在 `#[ducky]` 内不处理：旧流程仍属于
+  `#[duck_mod]` / `ducks!`。
+- 自动推导仅覆盖"声明为裸泛型参数"的 props；复合类型（`items: Vec<T>`）与未被裸引用的泛型
+  参数需要写显式形式。
+
 ### 出现重复字段名时会复用同一个 trait
 
 ```rust
@@ -867,6 +1019,8 @@ ducks! {
   loop/`if`/`match` 分支块、方法体各自生成一组 trait，且生成在 struct 所在的作用域内。
 - 生成前检测 `_Xxx` 命名冲突，冲突时给出明确的编译错误。
 - `#[props(..)]` / `#[duck(_Show{..})]`：trait 优先的 shadow trait，见「Props：先写 trait」。
+- `#[ducky]`：模块作用域内 `#[duck(_Show)]` 可省略 props 列表，见
+  「`#[ducky]`：模块作用域内的免花括号写法」。
 
 **限制**
 - `#[duck(MyTrait(..))]` 的自动 impl 要求自定义 trait 所有方法均有默认实现。
@@ -882,7 +1036,7 @@ ducks! {
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # 可发布的 proc-macro crate（duck_mod / ducks / duck / props）
+│   ├── duck-trait    # 可发布的 proc-macro crate（duck_mod / ducks / duck / props / ducky）
 │   └── verify        # 验证项目（fixture + 测试）
 └── readme.md
 ```

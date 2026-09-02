@@ -135,6 +135,152 @@
 //!   method signatures are built from the field types, so a field whose type
 //!   differs from the prop type is reported there as well.
 //!
+//! ## `#[ducky]`: brace-less entries in a module scope
+//!
+//! Inside a `#[ducky]` module, `#[props]` traits are registered, so
+//! struct-level `#[duck(_Show)]` entries may omit the props list — it is
+//! derived from the registered trait and the struct's own fields. Generic
+//! arguments are inferred while every prop is a bare generic parameter;
+//! otherwise write them explicitly.
+//!
+//! ```rust
+//! use duck_trait::ducky;
+//!
+//! #[ducky]
+//! mod duckied {
+//!     // `props`/`duck` markers are consumed by `#[ducky]`, no import needed
+//!
+//!     #[props(name: String, score: i32)]
+//!     pub trait Show {
+//!         fn show(&self) {
+//!             println!("{}: {}", self.name(), self.score());
+//!         }
+//!     }
+//!
+//!     // props derived from `Show`; extra fields are fine
+//!     #[duck(_Show)]
+//!     pub struct Player {
+//!         pub name: String,
+//!         pub score: i32,
+//!     }
+//!
+//!     impl Show for Player {}
+//! }
+//!
+//! use duckied::{Player, Show};
+//!
+//! Player { name: "duck".to_owned(), score: 7 }.show();
+//! ```
+//!
+//! Generic arguments may be written explicitly (their count is checked
+//! against the registered trait) or inferred for generic structs:
+//!
+//! ```rust
+//! use duck_trait::ducky;
+//!
+//! #[ducky]
+//! mod duckied {
+//!     #[props(inner: T)]
+//!     pub trait Has<T> {
+//!         fn get(&self) -> &T {
+//!             self.inner()
+//!         }
+//!     }
+//!
+//!     // generic arguments written explicitly; props still derived
+//!     #[duck(_Has<String>)]
+//!     pub struct Wrapper {
+//!         inner: String,
+//!     }
+//!
+//!     impl Has<String> for Wrapper {}
+//!
+//!     // generic structs infer `impl<T> _Has<T> for W<T>`
+//!     #[duck(_Has)]
+//!     pub struct W<T> {
+//!         inner: T,
+//!     }
+//!
+//!     impl<T> Has<T> for W<T> {}
+//!
+//!     pub fn check() {
+//!         let w = Wrapper { inner: "duck".to_owned() };
+//!         assert_eq!(w.get(), "duck");
+//!         let n = W { inner: 7 };
+//!         assert_eq!(n.get(), &7);
+//!     }
+//! }
+//!
+//! duckied::check();
+//! ```
+//!
+//! Traits registered in enclosing `#[ducky]` scopes are visible to nested
+//! modules. Field-level `#[duck]` markers are not touched inside `#[ducky]`:
+//! the old flow belongs to `#[duck_mod]`/`ducks!`.
+//!
+//! Rules enforced at compile time:
+//!
+//! - a brace-less entry must reference a `#[props]` trait of the scope:
+//!
+//! ```compile_fail
+//! use duck_trait::ducky;
+//!
+//! #[ducky]
+//! mod duckied {
+//!     #[duck(_Nope)]
+//!     struct A {
+//!         a: u8,
+//!     }
+//! }
+//! ```
+//!
+//! - inference requires every generic parameter to be the bare type of some
+//!   prop (`items: Vec<T>` cannot be inferred):
+//!
+//! ```compile_fail
+//! use duck_trait::ducky;
+//!
+//! #[ducky]
+//! mod duckied {
+//!     #[props(items: Vec<T>)]
+//!     trait Bag<T> {}
+//!
+//!     #[duck(_Bag)]
+//!     struct B {
+//!         items: Vec<u8>,
+//!     }
+//! }
+//! ```
+//!
+//! - explicitly written arguments are checked against the trait's generics:
+//!
+//! ```compile_fail
+//! use duck_trait::ducky;
+//!
+//! #[ducky]
+//! mod duckied {
+//!     #[props(a: T, b: U)]
+//!     trait Two<T, U> {}
+//!
+//!     #[duck(_Two<String>)]
+//!     struct S {
+//!         a: String,
+//!         b: u8,
+//!     }
+//! }
+//! ```
+//!
+//! - outside `#[ducky]`, the props list is required:
+//!
+//! ```compile_fail
+//! use duck_trait::duck;
+//!
+//! #[duck(_Show)]
+//! struct A {
+//!     name: String,
+//! }
+//! ```
+//!
 //! ## Trait visibility
 //!
 //! `#[duck]` defaults to a `pub(crate)` accessor trait — usable anywhere in
@@ -313,9 +459,9 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
 use syn::{
-  Attribute, Block, Fields, File, GenericArgument, GenericParam, Generics, Ident, Item, ItemEnum,
-  ItemMod, ItemStruct, ItemTrait, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type,
-  TypeParamBound, Visibility, parse::Parse, parse::ParseStream, parse::Parser, parse_quote, parse2,
+  Attribute, Block, Fields, FieldsNamed, File, GenericArgument, GenericParam, Generics, Ident,
+  Item, ItemEnum, ItemMod, ItemStruct, ItemTrait, ItemUnion, Meta, Path, PathArguments, Stmt,
+  Token, Type, TypeParamBound, Visibility, parse::Parse, parse::ParseStream, parse_quote, parse2,
   visit_mut::VisitMut,
 };
 
@@ -1037,74 +1183,92 @@ impl Parse for Prop {
   }
 }
 
-/// Expands `#[props(name: String, ..)] trait Show { .. }` into the shadow
-/// trait `_Show` plus the original trait bound to it as a supertrait. The
-/// shadow trait copies visibility, generics and where clauses verbatim from
-/// the annotated trait.
-fn expand_props(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
-  let props: Vec<Prop> = if attr.is_empty() {
-    return Err(syn::Error::new(
-      Span::call_site(),
-      "`#[props(..)]` requires at least one prop: `#[props(name: String)]`",
-    ));
-  } else {
-    Punctuated::<Prop, Token![,]>::parse_terminated.parse2(attr)?.into_iter().collect()
-  };
+/// Parsed `#[props(..)]` arguments: at least one prop, and every generated
+/// method name must be unique across props (`a` vs `a_set`, duplicates, ...).
+struct PropsAttr(Vec<Prop>);
 
-  // every generated method name must be unique across props (`a` vs `a_set`,
-  // duplicates, ...)
-  let mut seen: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
-  for prop in &props {
-    let base = method_base(&prop.name);
-    let generated = [
-      (prop.name.to_string(), "getter"),
-      (format!("{}_set", base), "setter"),
-      (format!("{}_mut", base), "mut accessor"),
-    ];
-    for (method, kind) in generated {
-      if let Some((previous, previous_kind)) =
-        seen.insert(method.clone(), (prop.name.to_string(), kind))
-      {
-        return Err(syn::Error::new(
-          prop.name.span(),
-          format!(
-            "prop `{previous}` ({previous_kind}) and prop `{}` ({kind}) both \
-             generate the method `{method}`; rename one of the props",
-            prop.name,
-          ),
-        ));
+impl Parse for PropsAttr {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let props: Vec<Prop> =
+      Punctuated::<Prop, Token![,]>::parse_terminated(input)?.into_iter().collect();
+    if props.is_empty() {
+      return Err(
+        input.error("`#[props(..)]` requires at least one prop: `#[props(name: String)]`"),
+      );
+    }
+
+    let mut seen: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
+    for prop in &props {
+      let base = method_base(&prop.name);
+      let generated = [
+        (prop.name.to_string(), "getter"),
+        (format!("{}_set", base), "setter"),
+        (format!("{}_mut", base), "mut accessor"),
+      ];
+      for (method, kind) in generated {
+        if let Some((previous, previous_kind)) =
+          seen.insert(method.clone(), (prop.name.to_string(), kind))
+        {
+          return Err(syn::Error::new(
+            prop.name.span(),
+            format!(
+              "prop `{previous}` ({previous_kind}) and prop `{}` ({kind}) both \
+               generate the method `{method}`; rename one of the props",
+              prop.name,
+            ),
+          ));
+        }
       }
     }
+    Ok(PropsAttr(props))
   }
+}
 
-  let mut trait_item: ItemTrait = parse2(item).map_err(|_| {
-    syn::Error::new(Span::call_site(), "`#[props(..)]` can only be applied to a trait")
-  })?;
-  if trait_item.auto_token.is_some() {
-    return Err(syn::Error::new(
-      trait_item.ident.span(),
-      "`#[props(..)]` does not support auto traits",
-    ));
+/// Parses the arguments of a `#[props(..)]` attribute.
+fn parse_props_attribute(attr: &Attribute) -> syn::Result<Vec<Prop>> {
+  match &attr.meta {
+    Meta::List(_) => Ok(attr.parse_args::<PropsAttr>()?.0),
+    _ => Err(syn::Error::new_spanned(
+      attr,
+      "`#[props(..)]` requires at least one prop: `#[props(name: String)]`",
+    )),
   }
-  let trait_str = trait_item.ident.to_string();
+}
+
+/// `_Show` for `Show`; a raw identifier cannot carry the `_` prefix.
+fn shadow_trait_ident(trait_ident: &Ident) -> syn::Result<Ident> {
+  let trait_str = trait_ident.to_string();
   if trait_str.starts_with("r#") {
     return Err(syn::Error::new(
-      trait_item.ident.span(),
+      trait_ident.span(),
       format!(
         "cannot derive a shadow trait name from the raw identifier `{trait_str}`; \
          rename the trait"
       ),
     ));
   }
+  Ok(format_ident!("_{}", trait_str))
+}
 
-  let shadow_ident = format_ident!("_{}", trait_str);
+/// Builds the shadow trait `_Show` and rewrites `trait_item` to depend on it
+/// as a supertrait. Visibility, generics and where clauses are copied
+/// verbatim from the annotated trait.
+fn build_shadow_items(mut trait_item: ItemTrait, props: &[Prop]) -> syn::Result<(Item, Item)> {
+  if trait_item.auto_token.is_some() {
+    return Err(syn::Error::new(
+      trait_item.ident.span(),
+      "`#[props(..)]` does not support auto traits",
+    ));
+  }
+  let shadow_ident = shadow_trait_ident(&trait_item.ident)?;
+
   let vis = &trait_item.vis;
   let params = &trait_item.generics.params;
   let where_clause = &trait_item.generics.where_clause;
   let generics_head = if params.is_empty() { quote!() } else { quote!(<#params>) };
 
   let mut accessors = TokenStream2::new();
-  for prop in &props {
+  for prop in props {
     let name = &prop.name;
     let ty = &prop.ty;
     let base = method_base(name);
@@ -1150,36 +1314,87 @@ fn expand_props(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStre
   }
   trait_item.supertraits.push_value(parse2::<TypeParamBound>(shadow_path)?);
 
-  Ok(quote! {
+  let shadow_tokens = quote! {
       #shadow_doc
       #vis trait #shadow_ident #generics_head #where_clause {
           #accessors
       }
-      #trait_item
-  })
+  };
+  let shadow_trait: ItemTrait = parse2(shadow_tokens).expect("generated shadow trait is valid");
+  Ok((Item::Trait(shadow_trait), Item::Trait(trait_item)))
+}
+
+/// Expands `#[props(name: String, ..)] trait Show { .. }` into the shadow
+/// trait `_Show` plus the original trait bound to it as a supertrait.
+fn expand_props(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+  let props = parse2::<PropsAttr>(attr)?.0;
+  let trait_item: ItemTrait = parse2(item).map_err(|_| {
+    syn::Error::new(Span::call_site(), "`#[props(..)]` can only be applied to a trait")
+  })?;
+  let (shadow, modified) = build_shadow_items(trait_item, &props)?;
+  Ok(quote! { #shadow #modified })
 }
 
 // ---------------------------------------------------------------------------
 // struct-level `#[duck(_Trait{props})]`: shadow-trait impls
 // ---------------------------------------------------------------------------
 
-/// One struct-level `#[duck(..)]` entry: `_Show{field, ..}`.
-struct DuckImplEntry {
+/// One struct-level `#[duck(..)]` entry: `_Show`, `_Has<String>` or
+/// `_Show{field, ..}`.
+struct DuckEntry {
   path: Path,
-  props: Vec<Ident>,
+  /// `None` when the braces are omitted; only resolvable inside `#[ducky]`.
+  props: Option<Vec<Ident>>,
 }
 
-impl Parse for DuckImplEntry {
+impl Parse for DuckEntry {
   fn parse(input: ParseStream) -> syn::Result<Self> {
     let path: Path = input.parse()?;
-    let content;
-    syn::braced!(content in input);
-    let props = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
-    if props.is_empty() {
-      return Err(content.error("expected at least one prop: `_Show{field, ..}`"));
-    }
-    Ok(DuckImplEntry { path, props: props.into_iter().collect() })
+    let props = if input.peek(syn::token::Brace) {
+      let content;
+      syn::braced!(content in input);
+      let props = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+      if props.is_empty() {
+        return Err(content.error("expected at least one prop: `_Show{field, ..}`"));
+      }
+      Some(props.into_iter().collect())
+    } else {
+      None
+    };
+    Ok(DuckEntry { path, props })
   }
+}
+
+/// Parsed `#[duck(..)]` arguments: at least one entry.
+struct DuckEntries(Vec<DuckEntry>);
+
+impl Parse for DuckEntries {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let entries: Vec<DuckEntry> =
+      Punctuated::<DuckEntry, Token![,]>::parse_terminated(input)?.into_iter().collect();
+    if entries.is_empty() {
+      return Err(input.error("`#[duck(..)]` requires at least one shadow-trait entry"));
+    }
+    Ok(DuckEntries(entries))
+  }
+}
+
+/// Parses the arguments of a struct-level `#[duck(..)]` attribute.
+fn parse_duck_entries_attribute(attr: &Attribute) -> syn::Result<Vec<DuckEntry>> {
+  match &attr.meta {
+    Meta::List(_) => Ok(attr.parse_args::<DuckEntries>()?.0),
+    _ => Err(syn::Error::new_spanned(
+      attr,
+      "`#[duck(..)]` requires at least one shadow-trait entry: `#[duck(_Show{field, ..})]`",
+    )),
+  }
+}
+
+/// One fully resolved entry: the complete trait path of the generated `impl`
+/// and the props it provides.
+struct ResolvedDuckEntry {
+  trait_path: Path,
+  props: Vec<Ident>,
 }
 
 /// Expands `#[duck(_Show{name, ..}, ..)] struct A { .. }` into the struct plus
@@ -1187,29 +1402,44 @@ impl Parse for DuckImplEntry {
 /// fields. The trait path (including any generic arguments) is used verbatim;
 /// method signatures are built from the field types.
 fn expand_struct_duck(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
-  let entries: Punctuated<DuckImplEntry, Token![,]> = Punctuated::parse_terminated.parse2(attr)?;
+  let entries = parse2::<DuckEntries>(attr)?.0;
   let struct_item: ItemStruct = parse2(item).map_err(|_| {
     syn::Error::new(
       Span::call_site(),
       "`#[duck(..)]` with shadow-trait entries can only be applied to a struct",
     )
   })?;
-  let fields = match &struct_item.fields {
-    Fields::Named(fields) => fields,
-    _ => {
-      return Err(syn::Error::new(
-        struct_item.ident.span(),
-        "`#[duck(_Trait{..})]` requires a struct with named fields",
+
+  let mut resolved = Vec::new();
+  for entry in entries {
+    let Some(props) = entry.props else {
+      return Err(syn::Error::new_spanned(
+        &entry.path,
+        "the brace-less form `#[duck(_Show)]` only works inside `#[ducky]`; \
+         write the props explicitly: `#[duck(_Show{field, ..})]`",
       ));
-    }
-  };
+    };
+    validate_impl_path(&entry.path)?;
+    resolved.push(ResolvedDuckEntry { trait_path: entry.path, props });
+  }
+
+  let impls = build_duck_impls(&struct_item, &resolved)?;
+  Ok(quote! { #struct_item #(#impls)* })
+}
+
+/// Builds one accessor impl per entry: every prop must match a same-named
+/// field, and the method signatures are built from the field types.
+fn build_duck_impls(
+  struct_item: &ItemStruct,
+  entries: &[ResolvedDuckEntry],
+) -> syn::Result<Vec<Item>> {
+  let fields = named_fields(struct_item)?;
   let struct_ident = &struct_item.ident;
   let (impl_generics, ty_generics, where_clause) = struct_item.generics.split_for_impl();
 
-  let mut impls = TokenStream2::new();
-  for entry in &entries {
-    let trait_path = &entry.path;
-    validate_impl_path(trait_path)?;
+  let mut impls = Vec::new();
+  for entry in entries {
+    let trait_path = &entry.trait_path;
     let mut listed: BTreeSet<String> = BTreeSet::new();
     let mut methods = TokenStream2::new();
     for prop in &entry.props {
@@ -1219,15 +1449,7 @@ fn expand_struct_duck(attr: TokenStream2, item: TokenStream2) -> syn::Result<Tok
           format!("prop `{prop}` is listed twice in `#[duck(..)]`"),
         ));
       }
-      let Some(field) = fields.named.iter().find(|field| field.ident.as_ref() == Some(prop)) else {
-        return Err(syn::Error::new(
-          prop.span(),
-          format!(
-            "no field `{prop}` on struct `{struct_ident}`; \
-             every prop in `#[duck(_Trait{{..}})]` must match a field name"
-          ),
-        ));
-      };
+      let field = find_field(fields, prop, struct_ident)?;
       let field_ident = field.ident.as_ref().expect("named field has an ident");
       let ty = &field.ty;
       let base = method_base(prop);
@@ -1245,16 +1467,41 @@ fn expand_struct_duck(attr: TokenStream2, item: TokenStream2) -> syn::Result<Tok
           }
       });
     }
-    impls.extend(quote! {
+    let tokens = quote! {
         impl #impl_generics #trait_path for #struct_ident #ty_generics #where_clause {
             #methods
         }
-    });
+    };
+    impls.push(parse2(tokens).expect("generated duck impl is valid"));
   }
+  Ok(impls)
+}
 
-  Ok(quote! {
-      #struct_item
-      #impls
+/// The named fields of `struct_item`, or an error for unit/tuple structs.
+fn named_fields(struct_item: &ItemStruct) -> syn::Result<&FieldsNamed> {
+  match &struct_item.fields {
+    Fields::Named(fields) => Ok(fields),
+    _ => Err(syn::Error::new(
+      struct_item.ident.span(),
+      "`#[duck(_Trait{..})]` requires a struct with named fields",
+    )),
+  }
+}
+
+/// The field matching `prop`, or a clear error.
+fn find_field<'a>(
+  fields: &'a FieldsNamed,
+  prop: &Ident,
+  struct_ident: &Ident,
+) -> syn::Result<&'a syn::Field> {
+  fields.named.iter().find(|field| field.ident.as_ref() == Some(prop)).ok_or_else(|| {
+    syn::Error::new(
+      prop.span(),
+      format!(
+        "no field `{prop}` on struct `{struct_ident}`; \
+         every prop in `#[duck(_Trait{{..}})]` must match a field name"
+      ),
+    )
   })
 }
 
@@ -1284,4 +1531,329 @@ fn validate_impl_path(path: &Path) -> syn::Result<()> {
     }
   }
   Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `#[ducky]`: module scope with brace-less `#[duck(_Show)]` entries
+// ---------------------------------------------------------------------------
+
+/// Registered `#[props]` trait of a `#[ducky]` scope.
+struct PropsTraitInfo {
+  /// `Show` — for error messages.
+  trait_ident: Ident,
+  /// `_Show` — the lookup key of brace-less `#[duck(_Show)]` entries.
+  shadow_ident: Ident,
+  /// Declared props; the declared types drive the bare-parameter matching.
+  props: Vec<Prop>,
+  /// Idents of the trait's generic parameters, in declaration order.
+  param_idents: Vec<Ident>,
+}
+
+/// The `#[props]` traits visible to a `#[ducky]` scope: its own traits plus
+/// those of the enclosing `#[ducky]` scopes.
+struct PropsRegistry<'a> {
+  local: Vec<PropsTraitInfo>,
+  parent: Option<&'a PropsRegistry<'a>>,
+}
+
+impl PropsRegistry<'_> {
+  /// The registered trait plus the number of `super::` hops from the
+  /// referencing scope to the scope that declared it.
+  fn find(&self, shadow: &str) -> Option<(&PropsTraitInfo, usize)> {
+    if let Some(info) = self.local.iter().find(|info| info.shadow_ident == shadow) {
+      return Some((info, 0));
+    }
+    let (info, level) = self.parent?.find(shadow)?;
+    Some((info, level + 1))
+  }
+}
+
+/// Attribute form: `#[ducky] mod name { .. }`.
+///
+/// Module scope for the props flow: `#[props]` traits declared inside are
+/// expanded in place and registered, so struct-level `#[duck(_Show)]` entries
+/// may omit the props list — it is derived from the registered trait and the
+/// struct's own fields. The shadow-trait arguments are inferred while every
+/// generic parameter is the bare type of some prop (`inner: T`); otherwise
+/// write them explicitly: `#[duck(_Has<String>)]`. Entries with an explicit
+/// props list (`#[duck(_Show{field, ..})]`) keep the standalone semantics.
+#[proc_macro_attribute]
+pub fn ducky(attr: TokenStream, item: TokenStream) -> TokenStream {
+  expand_ducky(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+fn expand_ducky(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+  if !attr.is_empty() {
+    return Err(syn::Error::new(Span::call_site(), "`#[ducky]` does not take any arguments"));
+  }
+  let mut module: ItemMod = parse2(item).map_err(|_| {
+    syn::Error::new(
+      Span::call_site(),
+      "`#[ducky]` can only be applied to an inline module: `#[ducky] mod name { .. }`",
+    )
+  })?;
+  let Some((_, items)) = &mut module.content else {
+    return Err(syn::Error::new(
+      module.ident.span(),
+      "`#[ducky]` cannot scan a file-based module (`mod name;`); inline the module instead",
+    ));
+  };
+  process_ducky_scope(items, None)?;
+  Ok(quote! { #module })
+}
+
+/// Processes one `#[ducky]` scope: expands and registers `#[props]` traits
+/// (pass one), then resolves the struct-level `#[duck(..)]` entries against
+/// them (pass two). Nested inline modules are processed as scopes of their
+/// own, seeing the enclosing scopes' registered traits. Field-level `#[duck]`
+/// markers are not touched: the old flow belongs to `#[duck_mod]`/`ducks!`.
+fn process_ducky_scope(
+  items: &mut Vec<Item>,
+  parent: Option<&PropsRegistry<'_>>,
+) -> syn::Result<()> {
+  // pass one: expand `#[props]` traits and register them
+  let mut registry = PropsRegistry { local: Vec::new(), parent };
+  let mut expanded: Vec<Item> = Vec::with_capacity(items.len());
+  for item in items.drain(..) {
+    let Item::Trait(mut trait_item) = item else {
+      expanded.push(item);
+      continue;
+    };
+    let Some(pos) = trait_item.attrs.iter().position(|attr| attr.path().is_ident("props")) else {
+      expanded.push(Item::Trait(trait_item));
+      continue;
+    };
+    let attr = trait_item.attrs.remove(pos);
+    let props = parse_props_attribute(&attr)?;
+    let param_idents = trait_item
+      .generics
+      .params
+      .iter()
+      .map(|param| match param {
+        GenericParam::Lifetime(lifetime) => lifetime.lifetime.ident.clone(),
+        GenericParam::Type(ty) => ty.ident.clone(),
+        GenericParam::Const(const_) => const_.ident.clone(),
+      })
+      .collect();
+    let trait_ident = trait_item.ident.clone();
+    let shadow_ident = shadow_trait_ident(&trait_item.ident)?;
+    let (shadow, modified) = build_shadow_items(trait_item, &props)?;
+    registry.local.push(PropsTraitInfo { trait_ident, shadow_ident, props, param_idents });
+    expanded.push(shadow);
+    expanded.push(modified);
+  }
+
+  // pass two: resolve struct-level `#[duck(..)]` entries; recurse into
+  // nested inline modules
+  let mut result: Vec<Item> = Vec::with_capacity(expanded.len() + 1);
+  for item in expanded {
+    match item {
+      Item::Struct(mut struct_item) => {
+        let Some(pos) = struct_item.attrs.iter().position(|attr| attr.path().is_ident("duck"))
+        else {
+          result.push(Item::Struct(struct_item));
+          continue;
+        };
+        let attr = struct_item.attrs.remove(pos);
+        let entries = parse_duck_entries_attribute(&attr)?;
+        let resolved = resolve_ducky_entries(&struct_item, entries, &registry)?;
+        let impls = build_duck_impls(&struct_item, &resolved)?;
+        result.push(Item::Struct(struct_item));
+        result.extend(impls);
+      }
+      Item::Mod(mut module) => {
+        if let Some((_, inner)) = &mut module.content {
+          // this pass already covered the module's contents; strip a
+          // redundant `#[ducky]` marker so it is not processed twice
+          module.attrs.retain(|attr| !attr.path().is_ident("ducky"));
+          process_ducky_scope(inner, Some(&registry))?;
+        }
+        result.push(Item::Mod(module));
+      }
+      other => result.push(other),
+    }
+  }
+  *items = result;
+  Ok(())
+}
+
+/// Resolves the entries of a struct-level `#[duck(..)]` attribute inside a
+/// `#[ducky]` scope. Entries with an explicit props list keep their trait
+/// path verbatim; brace-less entries resolve their props from the registered
+/// `#[props]` trait and infer the shadow-trait arguments.
+fn resolve_ducky_entries(
+  struct_item: &ItemStruct,
+  entries: Vec<DuckEntry>,
+  registry: &PropsRegistry<'_>,
+) -> syn::Result<Vec<ResolvedDuckEntry>> {
+  let mut resolved = Vec::new();
+  for entry in entries {
+    let DuckEntry { path, props } = entry;
+    let Some(props) = props else {
+      let (info, level) = lookup_props_trait(&path, registry)?;
+      let trait_path = resolve_trait_path(info, level, &path, struct_item)?;
+      let props = info.props.iter().map(|prop| prop.name.clone()).collect();
+      resolved.push(ResolvedDuckEntry { trait_path, props });
+      continue;
+    };
+    let trait_path = realign_path(&path, registry);
+    validate_impl_path(&trait_path)?;
+    resolved.push(ResolvedDuckEntry { trait_path, props });
+  }
+  Ok(resolved)
+}
+
+/// Builds the trait path for an impl referencing a registered trait:
+/// `level` `super::` hops up to the declaring scope, then the shadow trait's
+/// own ident (the exact token the declaration used) and the given arguments.
+fn registered_trait_path(info: &PropsTraitInfo, level: usize, args: Option<TokenStream2>) -> Path {
+  let shadow_ident = &info.shadow_ident;
+  let mut tokens = quote!();
+  for _ in 0..level {
+    tokens.extend(quote!(super::));
+  }
+  match args {
+    Some(args) => tokens.extend(quote!(#shadow_ident<#args>)),
+    None => tokens.extend(quote!(#shadow_ident)),
+  }
+  parse2(tokens).expect("registered trait path is valid")
+}
+
+/// Rebuilds a braced entry's path on the registered trait when it refers to a
+/// trait of this scope, so the reference and the macro-generated declaration
+/// resolve together even from nested modules. Paths that do not match a
+/// registered trait are kept verbatim.
+fn realign_path(path: &Path, registry: &PropsRegistry<'_>) -> Path {
+  if path.leading_colon.is_some() || path.segments.len() != 1 {
+    return path.clone();
+  }
+  let segment = &path.segments[0];
+  let Some((info, level)) = registry.find(&segment.ident.to_string()) else {
+    return path.clone();
+  };
+  match &segment.arguments {
+    PathArguments::None => registered_trait_path(info, level, None),
+    PathArguments::AngleBracketed(args) => {
+      let args = &args.args;
+      registered_trait_path(info, level, Some(quote!(#args)))
+    }
+    PathArguments::Parenthesized(_) => path.clone(),
+  }
+}
+
+/// Looks up the registered `#[props]` trait behind a brace-less entry path.
+fn lookup_props_trait<'a>(
+  path: &Path,
+  registry: &'a PropsRegistry<'a>,
+) -> syn::Result<(&'a PropsTraitInfo, usize)> {
+  let ident = match path.segments.last() {
+    Some(segment) if path.segments.len() == 1 && path.leading_colon.is_none() => &segment.ident,
+    _ => {
+      return Err(syn::Error::new_spanned(
+        path,
+        "the brace-less form `#[duck(_Show)]` requires the shadow trait of a \
+         `#[props]` trait declared in a `#[ducky]` scope; write the props \
+         explicitly: `#[duck(_Show{field, ..})]`",
+      ));
+    }
+  };
+  registry.find(&ident.to_string()).ok_or_else(|| {
+    syn::Error::new(
+      ident.span(),
+      format!(
+        "no `#[props]` trait generating `{ident}` was found in this `#[ducky]` scope; \
+         declare the trait here or write the props explicitly: \
+         `#[duck({ident}{{field, ..}})]`"
+      ),
+    )
+  })
+}
+
+/// Builds the trait path of the generated impl for a brace-less entry:
+/// explicit arguments are used verbatim with their count checked against the
+/// registered trait, and missing arguments are inferred while every generic
+/// parameter is the bare type of some prop.
+fn resolve_trait_path(
+  info: &PropsTraitInfo,
+  level: usize,
+  path: &Path,
+  struct_item: &ItemStruct,
+) -> syn::Result<Path> {
+  let segment = &path.segments[0];
+  match &segment.arguments {
+    PathArguments::AngleBracketed(args) => {
+      let expected = info.param_idents.len();
+      let found = args.args.len();
+      if found != expected {
+        return Err(syn::Error::new_spanned(
+          args,
+          format!(
+            "`{shadow}` takes {expected} generic argument(s) (trait `{trait}` \
+             declares {expected} generic parameter(s)), but {found} were written",
+            shadow = info.shadow_ident,
+            trait = info.trait_ident,
+          ),
+        ));
+      }
+      let args = &args.args;
+      Ok(registered_trait_path(info, level, Some(quote!(#args))))
+    }
+    PathArguments::None if info.param_idents.is_empty() => {
+      Ok(registered_trait_path(info, level, None))
+    }
+    PathArguments::None => {
+      // one argument per generic parameter, filled with the field type of the
+      // prop declared as that bare parameter
+      let fields = named_fields(struct_item)?;
+      let mut args: Vec<&Type> = Vec::new();
+      for param in &info.param_idents {
+        let mut candidates =
+          info.props.iter().filter(|prop| is_bare_param(&prop.ty, param)).peekable();
+        let Some(first) = candidates.next() else {
+          return Err(syn::Error::new(
+            param.span(),
+            format!(
+              "cannot infer the shadow-trait arguments for `{shadow}`: generic \
+               parameter `{param}` is not used as the bare type of any prop; \
+               write them explicitly: `#[duck({shadow}<..>)]`",
+              shadow = info.shadow_ident,
+            ),
+          ));
+        };
+        let first_field = find_field(fields, &first.name, &struct_item.ident)?;
+        let first_ty = &first_field.ty;
+        for other in candidates {
+          let other_field = find_field(fields, &other.name, &struct_item.ident)?;
+          let other_ty = &other_field.ty;
+          if quote!(#first_ty).to_string() != quote!(#other_ty).to_string() {
+            return Err(syn::Error::new(
+              other.name.span(),
+              format!(
+                "props `{first}` and `{other}` both fill the generic parameter \
+                 `{param}` of `{shadow}`, but their field types differ; write \
+                 the arguments explicitly: `#[duck({shadow}<..>)]`",
+                first = first.name,
+                other = other.name,
+                shadow = info.shadow_ident,
+              ),
+            ));
+          }
+        }
+        args.push(first_ty);
+      }
+      Ok(registered_trait_path(info, level, Some(quote!(#(#args),*))))
+    }
+    PathArguments::Parenthesized(_) => unreachable!("rejected by `validate_impl_path`"),
+  }
+}
+
+/// Whether `ty` is exactly the bare generic parameter `param` (no path
+/// arguments, no qualification).
+fn is_bare_param(ty: &Type, param: &Ident) -> bool {
+  matches!(ty, Type::Path(type_path) if
+    type_path.qself.is_none()
+      && type_path.path.leading_colon.is_none()
+      && type_path.path.segments.len() == 1
+      && type_path.path.segments[0].ident == *param
+      && type_path.path.segments[0].arguments.is_none())
 }
