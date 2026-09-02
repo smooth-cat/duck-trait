@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use duck_trait::{duck_mod, ducks};
+use duck_trait::{duck, duck_mod, ducks, props};
 
 // ---------------------------------------------------------------------------
 // README usage examples — `ducks!` form (recommended)
@@ -633,4 +633,220 @@ mod vis_kw {
     assert_eq!(c.v(), &2);
     assert_eq!(s.w(), &3);
   }
+}
+
+// ---------------------------------------------------------------------------
+// props / shadow traits — trait-first flow (`#[props]` + `#[duck(_Show{..})]`)
+// ---------------------------------------------------------------------------
+
+#[props(name: String, score: i32)]
+trait Show {
+  fn show(&self) -> String {
+    format!("{}: {}", self.name(), self.score())
+  }
+}
+
+#[derive(Debug)]
+#[duck(_Show{name, score})]
+struct ShowPlayer {
+  name: String,
+  score: i32,
+}
+
+impl Show for ShowPlayer {}
+
+#[cfg(test)]
+#[test]
+fn props_basic() {
+  let mut p = ShowPlayer { name: String::from("neo"), score: 1 };
+  assert_eq!(p.show(), "neo: 1");
+  p.name_set(String::from("trinity"));
+  *p.score_mut() += 41;
+  assert_eq!(p.score(), &42);
+  assert_eq!(p.show(), "trinity: 42");
+}
+
+// a prop type may reference a same-named trait generic; the struct side then
+// spells the arguments out explicitly
+#[props(inner: T)]
+trait Has<T> {
+  fn get(&self) -> &T {
+    self.inner()
+  }
+}
+
+#[duck(_Has<String>{inner})]
+struct HasA {
+  inner: String,
+}
+
+impl Has<String> for HasA {}
+
+// the trait arguments may reference the struct's own generics
+#[duck(_Has<T>{inner})]
+struct HasW<T> {
+  inner: T,
+}
+
+impl<T> Has<T> for HasW<T> {}
+
+#[cfg(test)]
+#[test]
+fn props_generics() {
+  let mut a = HasA { inner: String::from("duck") };
+  assert_eq!(*a.get(), "duck");
+  a.inner_set(String::from("goose"));
+  assert_eq!(*a.get(), "goose");
+
+  let mut w = HasW { inner: 7 };
+  *w.inner_mut() += 35;
+  assert_eq!(*w.get(), 42);
+}
+
+// lifetimes follow the same same-named-generics rule
+#[props(text: &'a str)]
+trait Text<'a> {
+  fn shout(&self) -> &'a str {
+    self.text()
+  }
+}
+
+#[duck(_Text<'a>{text})]
+struct BorrowedText<'a> {
+  text: &'a str,
+}
+
+impl<'a> Text<'a> for BorrowedText<'a> {}
+
+#[cfg(test)]
+#[test]
+fn props_lifetimes() {
+  let b = BorrowedText { text: "quack" };
+  assert_eq!(b.shout(), "quack");
+}
+
+// raw identifier props: getter keeps `r#type`, setter drops the prefix
+#[props(r#type: String)]
+trait KeywordLike {
+  fn kind(&self) -> &str {
+    self.r#type()
+  }
+}
+
+#[duck(_KeywordLike{r#type})]
+struct KwProp {
+  r#type: String,
+}
+
+impl KeywordLike for KwProp {}
+
+#[cfg(test)]
+#[test]
+fn props_raw_ident() {
+  let k = KwProp { r#type: String::from("mallard") };
+  assert_eq!(k.kind(), "mallard");
+  assert_eq!(k.r#type(), "mallard");
+}
+
+#[props(a: u8)]
+trait HasAProp {
+  fn get_a(&self) -> u8 {
+    *self.a()
+  }
+}
+
+#[props(b: u8)]
+trait HasBProp {
+  fn get_b(&self) -> u8 {
+    *self.b()
+  }
+}
+
+#[duck(_HasAProp{a}, _HasBProp{b})]
+struct BothProps {
+  a: u8,
+  b: u8,
+}
+
+impl HasAProp for BothProps {}
+impl HasBProp for BothProps {}
+
+#[cfg(test)]
+#[test]
+fn props_multiple_shadow_traits() {
+  let both = BothProps { a: 3, b: 4 };
+  assert_eq!(both.get_a(), 3);
+  assert_eq!(both.get_b(), 4);
+}
+
+// the new flow coexists with the old field markers inside one `ducks!` scope;
+// a props trait is satisfied through `#[duck(_Named{..})]`, an old-style trait
+// through the `_Label` accessor trait
+ducks! {
+  #[props(label: String)]
+  trait Named {
+    fn label_or<'a>(&'a self, fallback: &'a str) -> &'a str {
+      if self.label().is_empty() { fallback } else { self.label() }
+    }
+  }
+
+  #[duck(_Named{label})]
+  struct Hen {
+    label: String,
+  }
+
+  struct Coop {
+    #[duck]
+    label: String,
+  }
+
+  trait Roost: _Label<String> {
+    fn is_roosting(&self) -> bool {
+      self.label() == "coop"
+    }
+  }
+}
+
+impl Named for Hen {}
+impl Roost for Coop {}
+
+#[cfg(test)]
+#[test]
+fn props_coexists_with_field_markers() {
+  let hen = Hen { label: String::from("henrietta") };
+  assert_eq!(hen.label_or("goose"), "henrietta");
+  let empty = Hen { label: String::new() };
+  assert_eq!(empty.label_or("goose"), "goose");
+
+  let mut coop = Coop { label: String::from("coop") };
+  assert!(coop.is_roosting());
+  coop.label_set(String::from("nest"));
+  assert!(!coop.is_roosting());
+}
+
+// the shadow trait copies its visibility from the annotated trait
+mod props_vis {
+  use duck_trait::{duck, props};
+
+  #[props(v: u8)]
+  pub trait PublicProps {
+    fn doubled(&self) -> u8 {
+      *self.v() * 2
+    }
+  }
+
+  #[duck(_PublicProps{v})]
+  pub struct Holder {
+    pub v: u8,
+  }
+}
+
+impl props_vis::PublicProps for props_vis::Holder {}
+
+#[cfg(test)]
+#[test]
+fn props_visibility_follows_trait() {
+  use props_vis::PublicProps;
+
+  assert_eq!(props_vis::Holder { v: 2 }.doubled(), 4);
 }

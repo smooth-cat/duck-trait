@@ -261,6 +261,79 @@ arguments are kept as-is (you may reference the struct's own generic parameters)
   scope.
 - `_` only supports a bare placeholder (e.g. the `_` in `MyValue<Vec<_>>` is not replaced).
 
+### Props: write the trait first
+
+With field markers, a trait has to wait for a struct to exist. `#[props(..)]` declares the data a
+trait needs on the trait itself: the macro generates a shadow trait `_Show` with the accessor
+methods and binds `Show` to it as a supertrait. A struct opts in with `#[duck(_Show{name, score})]`,
+listing the props it provides; the generated impl reads the same-named fields.
+
+```rust
+use duck_trait::{duck, props};
+
+#[props(name: String, score: i32)]
+pub trait Show {
+  fn show(&self) {
+    println!("{}: {}", self.name(), self.score());
+  }
+}
+
+#[duck(_Show{name, score})]
+struct Player {
+  name: String,
+  score: i32,
+}
+
+impl Show for Player {}
+```
+
+Before / after expansion:
+
+```rust
+/*----------------- Before -----------------*/
+#[props(name: String, score: i32)]
+pub trait Show { /* ... */ }
+
+#[duck(_Show{name, score})]
+struct Player { name: String, score: i32 }
+/*----------------- After -----------------*/
+pub trait _Show {
+  fn name(&self) -> &String;
+  fn name_set(&mut self, v: String);
+  fn name_mut(&mut self) -> &mut String;
+  fn score(&self) -> &i32;
+  fn score_set(&mut self, v: i32);
+  fn score_mut(&mut self) -> &mut i32;
+}
+
+pub trait Show: _Show { /* ... */ }
+
+struct Player { name: String, score: i32 }
+
+impl _Show for Player {
+  fn name(&self) -> &String { &self.name }
+  fn name_set(&mut self, v: String) { self.name = v; }
+  fn name_mut(&mut self) -> &mut String { &mut self.name }
+  // score likewise
+}
+```
+
+- The shadow trait copies visibility, generics and where clauses verbatim from the annotated trait;
+  a prop type may reference a same-named trait generic — `#[props(inner: T)] trait Has<T>` generates
+  `trait _Has<T>` — lifetimes work the same way (`#[props(text: &'a str)] trait Text<'a>`).
+- The struct side writes the shadow-trait arguments in full (`#[duck(_Has<String>{inner})]`) and may
+  reference the struct's own generics: `#[duck(_Has<T>{inner})] struct W<T> { inner: T }` generates
+  `impl<T> _Has<T> for W<T>`.
+- Multiple shadow traits can be implemented at once: `#[duck(_A{a}, _B{b, c})]`.
+- Props are matched to fields by name: a missing field is reported by the macro; a field whose type
+  differs from the prop type is reported by the compiler on the generated impl (the impl's method
+  signatures are built from the field types). Props not listed at all leave the trait unimplemented
+  (E0046).
+- Generated method names must not collide: a prop named `a_set` clashes with the setter of a prop
+  named `a`.
+- The old field-marker flow is untouched; both flows can be mixed freely, even inside one
+  `ducks!` / `#[duck_mod]` scope.
+
 ### Duplicate field names reuse the same trait
 
 ```rust
@@ -313,6 +386,8 @@ ducks! {
   `unsafe`/`async`/`const` blocks, loop/`if`/`match` branch blocks and method bodies each get their
   own set of traits, generated inside the scope where the struct is declared.
 - Detects `_Xxx` naming conflicts before generation and emits a clear compile error on conflict.
+- `#[props(..)]` / `#[duck(_Show{..})]`: trait-first shadow traits, see "Props: write the trait
+  first".
 
 **Limitations**
 - The auto impl of `#[duck(MyTrait(..))]` requires every method of the custom trait to have a default
@@ -332,7 +407,7 @@ ducks! {
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # Publishable proc-macro crate (duck_mod / ducks / duck)
+│   ├── duck-trait    # Publishable proc-macro crate (duck_mod / ducks / duck / props)
 │   └── verify        # Verification project (fixtures + tests)
 └── readme.md
 ```
@@ -673,6 +748,75 @@ b.value();
   同一作用域内手写 `impl MyValue<String> for B {}`。
 - `_` 只支持裸占位（如 `MyValue<Vec<_>>` 中的 `_` 不会被替换）。
 
+### Props：先写 trait
+
+字段标记方案下，trait 必须等 struct 先存在。`#[props(..)]` 把 trait 需要的数据直接声明在 trait
+上：宏生成 shadow trait `_Show` 及其访问器方法，并把 `Show` 绑定为它的 supertrait。struct 侧用
+`#[duck(_Show{name, score})]` 显式列出自己提供的 props，生成的 impl 直接读取同名字段。
+
+```rust
+use duck_trait::{duck, props};
+
+#[props(name: String, score: i32)]
+pub trait Show {
+  fn show(&self) {
+    println!("{}: {}", self.name(), self.score());
+  }
+}
+
+#[duck(_Show{name, score})]
+struct Player {
+  name: String,
+  score: i32,
+}
+
+impl Show for Player {}
+```
+
+展开前后对比：
+
+```rust
+/*----------------- 展开前 -----------------*/
+#[props(name: String, score: i32)]
+pub trait Show { /* ... */ }
+
+#[duck(_Show{name, score})]
+struct Player { name: String, score: i32 }
+/*----------------- 展开后 -----------------*/
+pub trait _Show {
+  fn name(&self) -> &String;
+  fn name_set(&mut self, v: String);
+  fn name_mut(&mut self) -> &mut String;
+  fn score(&self) -> &i32;
+  fn score_set(&mut self, v: i32);
+  fn score_mut(&mut self) -> &mut i32;
+}
+
+pub trait Show: _Show { /* ... */ }
+
+struct Player { name: String, score: i32 }
+
+impl _Show for Player {
+  fn name(&self) -> &String { &self.name }
+  fn name_set(&mut self, v: String) { self.name = v; }
+  fn name_mut(&mut self) -> &mut String { &mut self.name }
+  // score 同理
+}
+```
+
+- shadow trait 的可见性、generics、where 子句原样复制自原 trait；prop 类型可以引用 trait 的同名
+  泛型 —— `#[props(inner: T)] trait Has<T>` 生成 `trait _Has<T>`；生命周期同理
+  （`#[props(text: &'a str)] trait Text<'a>`）。
+- struct 侧需要完整写出 shadow trait 的泛型参数（`#[duck(_Has<String>{inner})]`），也可以引用
+  struct 自身的泛型：`#[duck(_Has<T>{inner})] struct W<T> { inner: T }` 生成
+  `impl<T> _Has<T> for W<T>`。
+- 一次可以实现多个 shadow trait：`#[duck(_A{a}, _B{b, c})]`。
+- prop 按名字匹配字段：缺少同名字段由宏报错；字段类型与 prop 类型不一致时，由编译器在生成的 impl
+  处报错（impl 的方法签名由字段类型生成）。完全未列出的 props 会导致 trait 未实现（E0046）。
+- 生成的方法名不允许冲突：prop `a_set` 会与 prop `a` 的 setter 冲突。
+- 旧字段标记方案完全不变；两种方案可以自由混用，甚至可以在同一个 `ducks!` / `#[duck_mod]`
+  作用域内混用。
+
 ### 出现重复字段名时会复用同一个 trait
 
 ```rust
@@ -722,6 +866,7 @@ ducks! {
 - 递归处理嵌套的内联模块与块级作用域：函数体、闭包、`unsafe`/`async`/`const` 块、
   loop/`if`/`match` 分支块、方法体各自生成一组 trait，且生成在 struct 所在的作用域内。
 - 生成前检测 `_Xxx` 命名冲突，冲突时给出明确的编译错误。
+- `#[props(..)]` / `#[duck(_Show{..})]`：trait 优先的 shadow trait，见「Props：先写 trait」。
 
 **限制**
 - `#[duck(MyTrait(..))]` 的自动 impl 要求自定义 trait 所有方法均有默认实现。
@@ -737,7 +882,7 @@ ducks! {
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # 可发布的 proc-macro crate（duck_mod / ducks / duck）
+│   ├── duck-trait    # 可发布的 proc-macro crate（duck_mod / ducks / duck / props）
 │   └── verify        # 验证项目（fixture + 测试）
 └── readme.md
 ```

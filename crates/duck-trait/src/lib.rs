@@ -51,6 +51,90 @@
 //! assert_eq!(b.my_get(), "hi");
 //! ```
 //!
+//! ## Props: write the trait first
+//!
+//! `#[props(..)]` declares the data a trait needs on the trait itself, so it
+//! no longer has to wait for a struct to exist. The macro generates a shadow
+//! trait `_Show` with `xxx()` / `xxx_set()` / `xxx_mut()` accessors for every
+//! prop and binds `Show` to it as a supertrait:
+//!
+//! ```rust
+//! use duck_trait::{duck, props};
+//!
+//! #[props(name: String, score: i32)]
+//! pub trait Show {
+//!     fn show(&self) {
+//!         println!("{}: {}", self.name(), self.score());
+//!     }
+//! }
+//!
+//! #[duck(_Show{name, score})]
+//! struct Player {
+//!     name: String,
+//!     score: i32,
+//! }
+//!
+//! impl Show for Player {}
+//!
+//! Player { name: "duck".to_owned(), score: 7 }.show();
+//! ```
+//!
+//! The shadow trait copies visibility, generics and where clauses verbatim
+//! from the annotated trait. A prop type may reference a same-named generic
+//! of the trait; the struct side then spells the arguments out explicitly
+//! (struct generics may be used as well):
+//!
+//! ```rust
+//! use duck_trait::{duck, props};
+//!
+//! #[props(inner: T)]
+//! trait Has<T> {
+//!     fn get(&self) -> &T {
+//!         self.inner()
+//!     }
+//! }
+//!
+//! #[duck(_Has<T>{inner})]
+//! struct Wrapper<T> {
+//!     inner: T,
+//! }
+//!
+//! impl<T> Has<T> for Wrapper<T> {}
+//!
+//! assert_eq!(Wrapper { inner: 7 }.get(), &7);
+//! ```
+//!
+//! Rules enforced at compile time:
+//!
+//! - every prop listed in `#[duck(_Trait{..})]` must match a same-named field:
+//!
+//! ```compile_fail
+//! use duck_trait::{duck, props};
+//!
+//! #[props(name: String)]
+//! trait Show {}
+//!
+//! #[duck(_Show{name, score})]
+//! struct A {
+//!     name: String,
+//! }
+//! ```
+//!
+//! - generated accessor names must not collide (a prop named `a_set` clashes
+//!   with the setter of a prop named `a`):
+//!
+//! ```compile_fail
+//! use duck_trait::props;
+//!
+//! #[props(a: String, a_set: i32)]
+//! trait Conflicting {}
+//! ```
+//!
+//! - props not listed in `#[duck(..)]` leave the trait unimplemented (the
+//!   compiler reports the missing method on the generated impl), and the impl
+//!   method signatures are built from the field types, so a field whose type
+//!   differs from the prop type is reported there as well.
+//!
 //! ## Trait visibility
 //!
 //! `#[duck]` defaults to a `pub(crate)` accessor trait — usable anywhere in
@@ -227,10 +311,12 @@ use std::collections::{BTreeMap, BTreeSet, btree_map};
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
+use syn::punctuated::Punctuated;
 use syn::{
-  Attribute, Block, Fields, File, GenericArgument, Generics, Ident, Item, ItemEnum, ItemMod,
-  ItemStruct, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type, Visibility,
-  parse::ParseStream, parse2, visit_mut::VisitMut,
+  Attribute, Block, Fields, File, GenericArgument, GenericParam, Generics, Ident, Item, ItemEnum,
+  ItemMod, ItemStruct, ItemTrait, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type,
+  TypeParamBound, Visibility, parse::Parse, parse::ParseStream, parse::Parser, parse_quote, parse2,
+  visit_mut::VisitMut,
 };
 
 /// Attribute form: `#[duck_mod] mod name { .. }`.
@@ -252,16 +338,37 @@ pub fn ducks(item: TokenStream) -> TokenStream {
   expand_bang(item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Marker stub. `#[duck]` is consumed (stripped) by `#[duck_mod]`/`ducks!`
-/// before the compiler ever resolves it, so this macro only runs when the
-/// marker is used outside a duck_mod scope, or on something other than a
-/// struct field.
+/// Trait-side marker: `#[props(name: String, score: i32)]` on a trait.
+///
+/// Generates the shadow trait `_<Trait>` declaring `xxx()` / `xxx_set()` /
+/// `xxx_mut()` accessors for every prop, and binds the annotated trait to it
+/// as a supertrait so default methods can call the accessors directly. The
+/// shadow trait copies visibility, generics and where clauses verbatim from
+/// the annotated trait; the struct side opts in with
+/// `#[duck(_Show{field, ..})]` (see the crate docs).
 #[proc_macro_attribute]
-pub fn duck(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn props(attr: TokenStream, item: TokenStream) -> TokenStream {
+  expand_props(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Marker stub and struct-level entry. `#[duck]` on a struct field is consumed
+/// (stripped) by `#[duck_mod]`/`ducks!` before the compiler ever resolves it,
+/// so this macro only runs when the marker is used outside a duck_mod scope,
+/// or on something other than a struct field. On a struct,
+/// `#[duck(_Show{field, ..}, ..)]` implements the listed shadow traits for it:
+/// one accessor method triple per listed prop, reading the same-named fields.
+#[proc_macro_attribute]
+pub fn duck(attr: TokenStream, item: TokenStream) -> TokenStream {
+  let attr = TokenStream2::from(attr);
+  let item = TokenStream2::from(item);
+  if !attr.is_empty() && parse2::<ItemStruct>(item.clone()).is_ok() {
+    return expand_struct_duck(attr, item).unwrap_or_else(syn::Error::into_compile_error).into();
+  }
   syn::Error::new_spanned(
-    TokenStream2::from(item),
+    item,
     "`#[duck]` must be applied to a named struct field inside a scope \
-         annotated with `#[duck_mod]` or wrapped in `ducks! { .. }`",
+         annotated with `#[duck_mod]` or wrapped in `ducks! { .. }`, or to a \
+         struct with shadow-trait entries: `#[duck(_Show{field, ..})]`",
   )
   .into_compile_error()
   .into()
@@ -609,6 +716,12 @@ fn parse_marker(attr: &Attribute, public_marker: bool) -> syn::Result<(Visibilit
                  e.g. `#[duck(pub = crate, MyValue<_>)]`"
               ))
             })?);
+            if input.peek(syn::token::Brace) {
+              return Err(input.error(
+                "`#[duck(_Trait{..})]` is the struct-level shadow-trait form \
+                 and cannot be used on a field",
+              ));
+            }
           }
         }
         Ok(())
@@ -903,4 +1016,272 @@ fn item_ident(item: &Item) -> Option<&Ident> {
     Item::Union(item) => Some(&item.ident),
     _ => None,
   }
+}
+
+// ---------------------------------------------------------------------------
+// props: trait-first shadow traits
+// ---------------------------------------------------------------------------
+
+/// One `#[props(..)]` entry: `name: Type`.
+struct Prop {
+  name: Ident,
+  ty: Type,
+}
+
+impl Parse for Prop {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let name = input.parse::<Ident>()?;
+    input.parse::<Token![:]>()?;
+    let ty = input.parse::<Type>()?;
+    Ok(Prop { name, ty })
+  }
+}
+
+/// Expands `#[props(name: String, ..)] trait Show { .. }` into the shadow
+/// trait `_Show` plus the original trait bound to it as a supertrait. The
+/// shadow trait copies visibility, generics and where clauses verbatim from
+/// the annotated trait.
+fn expand_props(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+  let props: Vec<Prop> = if attr.is_empty() {
+    return Err(syn::Error::new(
+      Span::call_site(),
+      "`#[props(..)]` requires at least one prop: `#[props(name: String)]`",
+    ));
+  } else {
+    Punctuated::<Prop, Token![,]>::parse_terminated.parse2(attr)?.into_iter().collect()
+  };
+
+  // every generated method name must be unique across props (`a` vs `a_set`,
+  // duplicates, ...)
+  let mut seen: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
+  for prop in &props {
+    let base = method_base(&prop.name);
+    let generated = [
+      (prop.name.to_string(), "getter"),
+      (format!("{}_set", base), "setter"),
+      (format!("{}_mut", base), "mut accessor"),
+    ];
+    for (method, kind) in generated {
+      if let Some((previous, previous_kind)) =
+        seen.insert(method.clone(), (prop.name.to_string(), kind))
+      {
+        return Err(syn::Error::new(
+          prop.name.span(),
+          format!(
+            "prop `{previous}` ({previous_kind}) and prop `{}` ({kind}) both \
+             generate the method `{method}`; rename one of the props",
+            prop.name,
+          ),
+        ));
+      }
+    }
+  }
+
+  let mut trait_item: ItemTrait = parse2(item).map_err(|_| {
+    syn::Error::new(Span::call_site(), "`#[props(..)]` can only be applied to a trait")
+  })?;
+  if trait_item.auto_token.is_some() {
+    return Err(syn::Error::new(
+      trait_item.ident.span(),
+      "`#[props(..)]` does not support auto traits",
+    ));
+  }
+  let trait_str = trait_item.ident.to_string();
+  if trait_str.starts_with("r#") {
+    return Err(syn::Error::new(
+      trait_item.ident.span(),
+      format!(
+        "cannot derive a shadow trait name from the raw identifier `{trait_str}`; \
+         rename the trait"
+      ),
+    ));
+  }
+
+  let shadow_ident = format_ident!("_{}", trait_str);
+  let vis = &trait_item.vis;
+  let params = &trait_item.generics.params;
+  let where_clause = &trait_item.generics.where_clause;
+  let generics_head = if params.is_empty() { quote!() } else { quote!(<#params>) };
+
+  let mut accessors = TokenStream2::new();
+  for prop in &props {
+    let name = &prop.name;
+    let ty = &prop.ty;
+    let base = method_base(name);
+    let set_ident = format_ident!("{}_set", base);
+    let mut_ident = format_ident!("{}_mut", base);
+    accessors.extend(quote! {
+        fn #name(&self) -> &#ty;
+        fn #set_ident(&mut self, v: #ty);
+        fn #mut_ident(&mut self) -> &mut #ty;
+    });
+  }
+
+  let shadow_doc: Attribute = parse_quote!(#[doc = "Accessor trait generated by `duck-trait` for the props of the annotated trait."]);
+
+  // supertrait reference: the trait's own generic parameters as arguments
+  let args: Vec<TokenStream2> = trait_item
+    .generics
+    .params
+    .iter()
+    .map(|param| match param {
+      GenericParam::Lifetime(lifetime) => {
+        let lifetime = &lifetime.lifetime;
+        quote!(#lifetime)
+      }
+      GenericParam::Type(ty) => {
+        let ident = &ty.ident;
+        quote!(#ident)
+      }
+      GenericParam::Const(const_) => {
+        let ident = &const_.ident;
+        quote!(#ident)
+      }
+    })
+    .collect();
+  let shadow_path =
+    if args.is_empty() { quote!(#shadow_ident) } else { quote!(#shadow_ident<#(#args),*>) };
+
+  // bind the annotated trait to the shadow trait as a supertrait
+  if trait_item.supertraits.is_empty() {
+    trait_item.colon_token = Some(Token![:](Span::call_site()));
+  } else {
+    trait_item.supertraits.push_punct(Token![+](Span::call_site()));
+  }
+  trait_item.supertraits.push_value(parse2::<TypeParamBound>(shadow_path)?);
+
+  Ok(quote! {
+      #shadow_doc
+      #vis trait #shadow_ident #generics_head #where_clause {
+          #accessors
+      }
+      #trait_item
+  })
+}
+
+// ---------------------------------------------------------------------------
+// struct-level `#[duck(_Trait{props})]`: shadow-trait impls
+// ---------------------------------------------------------------------------
+
+/// One struct-level `#[duck(..)]` entry: `_Show{field, ..}`.
+struct DuckImplEntry {
+  path: Path,
+  props: Vec<Ident>,
+}
+
+impl Parse for DuckImplEntry {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let path: Path = input.parse()?;
+    let content;
+    syn::braced!(content in input);
+    let props = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+    if props.is_empty() {
+      return Err(content.error("expected at least one prop: `_Show{field, ..}`"));
+    }
+    Ok(DuckImplEntry { path, props: props.into_iter().collect() })
+  }
+}
+
+/// Expands `#[duck(_Show{name, ..}, ..)] struct A { .. }` into the struct plus
+/// one `impl _Show for A` per entry, with accessor methods reading the listed
+/// fields. The trait path (including any generic arguments) is used verbatim;
+/// method signatures are built from the field types.
+fn expand_struct_duck(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+  let entries: Punctuated<DuckImplEntry, Token![,]> = Punctuated::parse_terminated.parse2(attr)?;
+  let struct_item: ItemStruct = parse2(item).map_err(|_| {
+    syn::Error::new(
+      Span::call_site(),
+      "`#[duck(..)]` with shadow-trait entries can only be applied to a struct",
+    )
+  })?;
+  let fields = match &struct_item.fields {
+    Fields::Named(fields) => fields,
+    _ => {
+      return Err(syn::Error::new(
+        struct_item.ident.span(),
+        "`#[duck(_Trait{..})]` requires a struct with named fields",
+      ));
+    }
+  };
+  let struct_ident = &struct_item.ident;
+  let (impl_generics, ty_generics, where_clause) = struct_item.generics.split_for_impl();
+
+  let mut impls = TokenStream2::new();
+  for entry in &entries {
+    let trait_path = &entry.path;
+    validate_impl_path(trait_path)?;
+    let mut listed: BTreeSet<String> = BTreeSet::new();
+    let mut methods = TokenStream2::new();
+    for prop in &entry.props {
+      if !listed.insert(prop.to_string()) {
+        return Err(syn::Error::new(
+          prop.span(),
+          format!("prop `{prop}` is listed twice in `#[duck(..)]`"),
+        ));
+      }
+      let Some(field) = fields.named.iter().find(|field| field.ident.as_ref() == Some(prop)) else {
+        return Err(syn::Error::new(
+          prop.span(),
+          format!(
+            "no field `{prop}` on struct `{struct_ident}`; \
+             every prop in `#[duck(_Trait{{..}})]` must match a field name"
+          ),
+        ));
+      };
+      let field_ident = field.ident.as_ref().expect("named field has an ident");
+      let ty = &field.ty;
+      let base = method_base(prop);
+      let set_ident = format_ident!("{}_set", base);
+      let mut_ident = format_ident!("{}_mut", base);
+      methods.extend(quote! {
+          fn #prop(&self) -> &#ty {
+              &self.#field_ident
+          }
+          fn #set_ident(&mut self, v: #ty) {
+              self.#field_ident = v;
+          }
+          fn #mut_ident(&mut self) -> &mut #ty {
+              &mut self.#field_ident
+          }
+      });
+    }
+    impls.extend(quote! {
+        impl #impl_generics #trait_path for #struct_ident #ty_generics #where_clause {
+            #methods
+        }
+    });
+  }
+
+  Ok(quote! {
+      #struct_item
+      #impls
+  })
+}
+
+/// The shadow-trait path is used verbatim in the generated `impl`, so
+/// parenthesized arguments are never valid and `_` cannot be inferred there.
+fn validate_impl_path(path: &Path) -> syn::Result<()> {
+  for segment in &path.segments {
+    match &segment.arguments {
+      PathArguments::None => {}
+      PathArguments::Parenthesized(args) => {
+        return Err(syn::Error::new_spanned(
+          args,
+          "`#[duck(_Trait{..})]` does not support parenthesized generic arguments",
+        ));
+      }
+      PathArguments::AngleBracketed(args) => {
+        for arg in &args.args {
+          if let GenericArgument::Type(Type::Infer(_)) = arg {
+            return Err(syn::Error::new_spanned(
+              arg,
+              "`_` cannot be used here: the shadow-trait arguments of \
+               `#[duck(_Trait{..})]` must be written out in full",
+            ));
+          }
+        }
+      }
+    }
+  }
+  Ok(())
 }
