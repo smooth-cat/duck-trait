@@ -36,9 +36,9 @@ impl Opr for A;
 impl Opr for B; 
 ```
 
-### Basic usage — `fields!` + `#[props]` / `#[prop]`
+### Basic usage
 
-By convention the accessors are declared once in `src/_fields.rs`:
+⭐️ By convention the accessors are declared once in `src/_fields.rs`:
 
 ```rust
 use duck_trait::{fields, props};
@@ -54,27 +54,36 @@ fields! {
 // no import needed — the macro adds it for you
 // value: i32 maps to _Value<i32>
 #[props(value: i32)]
-trait Foo {
-  fn access(&self) {
+trait Opr {
+  fn double(&self) -> i32 {
     // you get the following 3 methods
-    // read &i32
-    *self.value();
+
     // read &mut i32
     self.value_mut();
+
     // set value
     self.value_set(99);
+
+    // read &i32
+    *self.value() * 2
   }
 }
 
 // 3. #[prop] makes the struct implement _Value<i32>
 // no import needed — the macro adds it for you
 #[props]
-struct Player {
+struct A {
   #[prop]
-  value: i32,
+  value: i32
+}
+#[props]
+struct B {
+  #[prop]
+  value: i32
 }
 
-impl Foo for Player {}
+impl Opr for A {}
+impl Opr for B {}
 ```
 
 **Limitations**: a `#[prop]` field removed entirely by `#[cfg]` breaks the generated impl; avoid
@@ -229,9 +238,9 @@ impl Opr for A;
 impl Opr for B;
 ```
 
-### 基础用法 —— `fields!` + `#[props]` / `#[prop]`
+### 基础用法
 
-约定在 `src/_fields.rs` 中统一声明访问器：
+⭐️ 约定在 `src/_fields.rs` 中统一声明访问器：
 
 ```rust
 use duck_trait::{fields, props};
@@ -247,27 +256,36 @@ fields! {
 // 不需要引入，宏会自动帮忙引入
 // value: i32 对应 _Value<i32>
 #[props(value: i32)]
-trait Foo {
-  fn access(&self) {
+trait Opr {
+  fn double(&self) -> i32 {
     // 你获得了以下 3 个方法
-    // 获取 &i32
-    *self.value();
+    
     // 获取 &mut i32
     self.value_mut();
+    
     // 设置 value
     self.value_set(99);
+    
+    // 获取 &i32
+    *self.value() * 2
   }
 }
 
 // 3. #[prop] 标记会实现 _Value<i32> trait
 // 不需要引入，宏会自动帮忙引入
 #[props]
-struct Player {
-  #[prop]
-  value: i32,
+struct A { 
+  #[prop]  
+  value: i32 
+}
+#[props]
+struct B { 
+  #[prop]  
+  value: i32 
 }
 
-impl Foo for Player {}
+impl Opr for A {}
+impl Opr for B {}
 ```
 
 **限制**：被 `#[cfg]` 整体移除的 `#[prop]` 字段会导致生成的 impl 编译失败；避免在同一 crate
