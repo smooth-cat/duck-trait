@@ -43,7 +43,9 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js",
     "test:integration": "npm run compile && node out/test/suite/launch.js",
-    "package": "npm run compile && vsce package --no-dependencies"
+    "package": "npm run compile && vsce package --no-dependencies",
+    "log": "vsce login",
+    "pub": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
