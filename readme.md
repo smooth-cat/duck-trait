@@ -285,6 +285,55 @@ ducks! {
 }
 ```
 
+### Field-based api — `fields!` + `#[props]`
+
+The marker api above generates traits where the struct is declared, so a trait consumer in another
+file must path-qualify the generated trait. The field-based api declares every accessor trait once
+in a dedicated module (by convention `crate::_fields`), and structs anywhere in the crate implement
+those shared traits — one trait per field name across the whole crate:
+
+```rust
+use duck_trait::{fields, props};
+
+// convention: `mod _fields;` + `src/_fields.rs` holds every declaration
+mod _fields {
+  use duck_trait::fields;
+
+  fields! {
+    value,    // pub(crate) trait _Value<T>
+    pub name, // pub trait _Name<T>
+  }
+}
+
+// traits bind to the declared accessors via `name: Type` pairs
+#[props(value: i32)]
+trait Show {
+  fn show(&self) -> i32 {
+    *self.value()
+  }
+}
+
+// structs marked with `#[prop]` implement the declared traits
+#[props]
+struct Player {
+  #[prop]
+  value: i32,
+}
+
+impl Show for Player {}
+```
+
+- `fields!` derives trait and method names from the field name with the same naming conventions as
+  the marker api; visibility defaults to `pub(crate)`, and any qualifier written before the name
+  (`pub`, `pub(crate)`, `pub(super)`, …) is applied to its trait.
+- `#[props]` on a struct strips the `#[prop]` markers and generates
+  `impl crate::_fields::_Value<i32> for Player`; override the module with
+  `#[props(path = crate::my_fields)]`.
+- `#[props]` on a trait appends one supertrait bound per `name: Type` pair, so default methods can
+  use the accessors without any imports.
+- A `#[prop]` field whose name was never declared fails to resolve its trait at the impl site —
+  the declaration list is the single source of truth.
+
 ### Naming conventions
 
 | Field      | Generated trait | Method                                     |
@@ -696,6 +745,52 @@ ducks! {
   }
 }
 ```
+
+### 基于字段声明的 api —— `fields!` + `#[props]`
+
+上面的标记 api 会在 struct 所在作用域生成 trait，其他文件里的 trait 使用方必须通过路径限定引用它。
+基于字段声明的 api 则把所有访问器 trait 集中声明到一个模块（约定为 `crate::_fields`），crate 内任意
+位置的 struct 都实现这组共享 trait——每个字段名全 crate 只有一个 trait：
+
+```rust
+use duck_trait::{fields, props};
+
+// 约定：`mod _fields;` + `src/_fields.rs` 集中存放所有声明
+mod _fields {
+  use duck_trait::fields;
+
+  fields! {
+    value,    // pub(crate) trait _Value<T>
+    pub name, // pub trait _Name<T>
+  }
+}
+
+// trait 通过 `name: Type` 对绑定到声明的访问器
+#[props(value: i32)]
+trait Show {
+  fn show(&self) -> i32 {
+    *self.value()
+  }
+}
+
+// 用 `#[prop]` 标记字段的 struct 自动实现声明的 trait
+#[props]
+struct Player {
+  #[prop]
+  value: i32,
+}
+
+impl Show for Player {}
+```
+
+- `fields!` 按字段名推导 trait 与方法名，命名约定与标记 api 一致；可见性默认 `pub(crate)`，
+  在名字前写任意限定符（`pub`、`pub(crate)`、`pub(super)`、…）会应用到对应的 trait。
+- `#[props]` 用于 struct 时剥离 `#[prop]` 标记并生成
+  `impl crate::_fields::_Value<i32> for Player`；用 `#[props(path = crate::my_fields)]`
+  可覆盖声明所在的模块。
+- `#[props]` 用于 trait 时为每个 `name: Type` 对追加一个 supertrait bound，默认方法无需任何
+  import 即可使用访问器。
+- 未在 `fields!` 中声明的 `#[prop]` 字段会在 impl 处报 unresolved trait——声明列表是唯一的事实来源。
 
 ### 命名约定
 

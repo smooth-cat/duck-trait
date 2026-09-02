@@ -24,6 +24,57 @@
 //! the field type — that is the whole point: write traits once, implement for
 //! every type that "has a `name`".
 //!
+//! ## Field-based api — `fields!` + `#[props]`
+//!
+//! The marker api above generates traits where the struct is declared, so a
+//! trait consumer in another file must path-qualify the generated trait. The
+//! field-based api instead declares every accessor trait once in a dedicated
+//! module (by convention `crate::_fields`), and `#[props]` generates impls
+//! against those declarations from any file in the crate:
+//!
+//! ```
+//! use duck_trait::{fields, props};
+//!
+//! // convention: `mod _fields;` + `src/_fields.rs` holds every declaration
+//! mod _fields {
+//!     use duck_trait::fields;
+//!
+//!     fields! {
+//!         value,
+//!         pub name,
+//!     }
+//! }
+//!
+//! // traits bind to the declared accessors via `name: Type` pairs
+//! #[props(value: i32)]
+//! trait Show {
+//!     fn show(&self) -> i32 {
+//!         *self.value()
+//!     }
+//! }
+//!
+//! // structs marked with `#[prop]` implement the declared traits
+//! #[props]
+//! struct Player {
+//!     #[prop]
+//!     value: i32,
+//! }
+//!
+//! impl Show for Player {}
+//!
+//! fn main() {
+//!     use _fields::_Value;
+//!
+//!     let mut player = Player { value: 1 };
+//!     player.value_set(2);
+//!     assert_eq!(player.show(), 2);
+//! }
+//! ```
+//!
+//! `#[props]` on a struct generates `impl crate::_fields::_Value<i32> for
+//! Player`; override the module with `#[props(path = crate::my_fields)]`.
+//! See [`fields`] and [`props`] for details.
+//!
 //! ## Custom traits
 //!
 //! `#[duck(MyTrait(..))]` additionally generates `impl MyTrait(..) for the
@@ -229,8 +280,11 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
   Attribute, Block, Fields, File, GenericArgument, Generics, Ident, Item, ItemEnum, ItemMod,
-  ItemStruct, ItemUnion, Meta, Path, PathArguments, Stmt, Token, Type, Visibility,
-  parse::ParseStream, parse2, visit_mut::VisitMut,
+  ItemStruct, ItemTrait, ItemUnion, Meta, Path, PathArguments, PathSegment, Stmt, Token, Type,
+  TypeParamBound, Visibility,
+  parse::{Parse, ParseStream},
+  parse_quote, parse2,
+  visit_mut::VisitMut,
 };
 
 /// Attribute form: `#[duck_mod] mod name { .. }`.
@@ -903,4 +957,482 @@ fn item_ident(item: &Item) -> Option<&Ident> {
     Item::Union(item) => Some(&item.ident),
     _ => None,
   }
+}
+
+// ---------------------------------------------------------------------------
+// field-based api — `fields!` + `#[props]`
+// ---------------------------------------------------------------------------
+
+/// Function-like form declaring the crate-wide accessor traits.
+///
+/// One trait per field name, named after the field (`value` -> `_Value`) with
+/// `value` / `value_set` / `value_mut` methods, exactly like the traits the
+/// marker api generates. Visibility defaults to `pub(crate)`; writing `pub`
+/// (or any other qualifier) before a name widens its trait:
+///
+/// ```
+/// use duck_trait::fields;
+///
+/// mod _fields {
+///     use duck_trait::fields;
+///
+///     fields! {
+///         value,      // pub(crate) trait _Value<T>
+///         pub name,   // pub trait _Name<T>
+///     }
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// By convention this macro is invoked inside a module named `_fields` at the
+/// crate root (`src/_fields.rs` plus `mod _fields;`), because `#[props]`
+/// generates impls against `crate::_fields::..` unless overridden with
+/// `path = ..`. The macro itself cannot verify where it is placed — a
+/// declaration outside `_fields` only surfaces as an unresolved trait when a
+/// `#[props]` struct is compiled.
+///
+/// Duplicate names that map to the same trait are rejected:
+///
+/// ```compile_fail
+/// use duck_trait::fields;
+///
+/// fields! {
+///     value,
+///     r#value, // error: maps to the same `_Value` trait
+/// }
+///
+/// fn main() {}
+/// ```
+#[proc_macro]
+pub fn fields(item: TokenStream) -> TokenStream {
+  expand_fields(item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Field-based entry point for structs and traits.
+///
+/// **On a struct** — strips the `#[prop]` field markers and generates one
+/// accessor-trait impl per marked field, bound to the trait declared for that
+/// field name in the `fields!` module. The trait is looked up under
+/// `crate::_fields` unless overridden with `path = ..`:
+///
+/// ```
+/// use duck_trait::{fields, props};
+///
+/// mod _fields {
+///     use duck_trait::fields;
+///
+///     fields!(value);
+/// }
+///
+/// #[props]
+/// struct S {
+///     #[prop]
+///     value: u8,
+///     unmarked: u8,
+/// }
+///
+/// fn main() {
+///     use _fields::_Value;
+///
+///     let mut s = S { value: 1, unmarked: 2 };
+///     *s.value_mut() += 1;
+///     assert_eq!(s.value(), &2);
+/// }
+/// ```
+///
+/// A struct field implements the trait for its own type, so structs in
+/// different files declaring the same field name share one trait even when
+/// the types differ.
+///
+/// **On a trait** — binds the trait to the declared accessor traits via
+/// supertrait bounds, so default methods (and implementors) can use the field
+/// accessors. Each `name: Type` pair becomes `crate::_fields::_Name<Type>`:
+///
+/// ```
+/// use duck_trait::{fields, props};
+///
+/// mod _fields {
+///     use duck_trait::fields;
+///
+///     fields!(value);
+/// }
+///
+/// #[props(value: i32)]
+/// trait Show {
+///     fn show(&self) -> i32 {
+///         *self.value()
+///     }
+/// }
+///
+/// #[props]
+/// struct S {
+///     #[prop]
+///     value: i32,
+/// }
+///
+/// impl Show for S {}
+///
+/// fn main() {
+///     assert_eq!(S { value: 7 }.show(), 7);
+/// }
+/// ```
+///
+/// Rules enforced at compile time:
+///
+/// - A `#[prop]` field whose name was never declared with [`fields`] fails to
+///   resolve its trait at the impl site:
+///
+/// ```compile_fail
+/// use duck_trait::props;
+///
+/// #[props]
+/// struct S {
+///     #[prop]
+///     value: u8, // error: no `_Value` trait declared in `crate::_fields`
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// - `#[prop]` takes no arguments:
+///
+/// ```compile_fail
+/// use duck_trait::{fields, props};
+///
+/// mod _fields {
+///     use duck_trait::fields;
+///
+///     fields!(value);
+/// }
+///
+/// #[props]
+/// struct S {
+///     #[prop(pub)] // error: `#[prop]` does not take arguments
+///     value: u8,
+/// }
+///
+/// fn main() {}
+/// ```
+#[proc_macro_attribute]
+pub fn props(attr: TokenStream, item: TokenStream) -> TokenStream {
+  expand_props(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Marker stub for the field-based api.
+///
+/// Inside a struct annotated with [`#[props]`](props) the field marker
+/// `#[prop]` is consumed (stripped) before the compiler ever resolves it, so
+/// this macro only runs when `#[prop]` is used outside such a struct, or on
+/// something other than a struct field.
+///
+/// ```compile_fail
+/// use duck_trait::prop;
+///
+/// #[prop] // error: must be applied to a named struct field inside `#[props]`
+/// fn main() {}
+/// ```
+///
+/// A `#[prop]` field without the `#[props]` wrapper never expands either:
+///
+/// ```compile_fail
+/// use duck_trait::prop;
+///
+/// struct S {
+///     #[prop] // error: `prop` is not a valid field attribute here
+///     v: u8,
+/// }
+///
+/// fn main() {}
+/// ```
+#[proc_macro_attribute]
+pub fn prop(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  syn::Error::new_spanned(
+    TokenStream2::from(item),
+    "`#[prop]` must be applied to a named struct field inside a struct \
+         annotated with `#[props]`",
+  )
+  .into_compile_error()
+  .into()
+}
+
+// ---------------------------------------------------------------------------
+// field-based api expansion
+// ---------------------------------------------------------------------------
+
+/// One `fields!` entry: optional visibility qualifier plus the field name.
+struct FieldDecl {
+  vis: Visibility,
+  ident: Ident,
+}
+
+impl Parse for FieldDecl {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let vis: Visibility = input.parse()?;
+    let ident: Ident = input.parse()?;
+    Ok(Self { vis, ident })
+  }
+}
+
+/// Parsed `fields!` argument list.
+struct FieldsInput {
+  decls: Vec<FieldDecl>,
+}
+
+impl Parse for FieldsInput {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let mut decls = Vec::new();
+    while !input.is_empty() {
+      decls.push(input.parse::<FieldDecl>()?);
+      if input.is_empty() {
+        break;
+      }
+      input.parse::<Token![,]>()?;
+    }
+    Ok(Self { decls })
+  }
+}
+
+fn expand_fields(item: TokenStream2) -> syn::Result<TokenStream2> {
+  if item.is_empty() {
+    return Err(syn::Error::new(
+      Span::call_site(),
+      "`fields!` requires at least one field name, e.g. `fields!(value)`",
+    ));
+  }
+
+  let FieldsInput { decls }: FieldsInput = parse2(item).map_err(|_| {
+    syn::Error::new(
+      Span::call_site(),
+      "`fields!` expects a comma-separated list of field names, \
+             e.g. `fields!(value, pub name)`",
+    )
+  })?;
+
+  // trait name (without leading `_`) -> first field mapping to it
+  let mut seen: BTreeMap<String, Ident> = BTreeMap::new();
+  let mut tokens = TokenStream2::new();
+  for decl in &decls {
+    let trait_name = trait_name_for(&decl.ident)?;
+    if let Some(first) = seen.get(&trait_name) {
+      return Err(syn::Error::new(
+        decl.ident.span(),
+        format!(
+          "field `{}` and field `{first}` map to the same accessor trait \
+                    `_{trait_name}`; remove one of them",
+          decl.ident,
+        ),
+      ));
+    }
+    seen.insert(trait_name.clone(), decl.ident.clone());
+
+    // no qualifier in the declaration -> `pub(crate)`, the same default the
+    // marker api uses for `#[duck]`
+    let vis = match &decl.vis {
+      Visibility::Inherited => default_vis(true),
+      other => other.clone(),
+    };
+    let trait_ident = format_ident!("_{}", trait_name);
+    // the getter keeps the original spelling (raw idents such as `r#type` stay raw)
+    let get_ident = &decl.ident;
+    let set_ident = format_ident!("{}_set", method_base(&decl.ident));
+    let mut_ident = format_ident!("{}_mut", method_base(&decl.ident));
+
+    tokens.extend(quote! {
+        #vis trait #trait_ident<T> {
+            fn #get_ident(&self) -> &T;
+            fn #set_ident(&mut self, v: T);
+            fn #mut_ident(&mut self) -> &mut T;
+        }
+    });
+  }
+  Ok(tokens)
+}
+
+/// Parsed `#[props(..)]` arguments: at most one `path = <module>` override and
+/// any number of `name: Type` pairs (pairs are only valid on traits).
+struct PropsAttr {
+  module: Option<Path>,
+  pairs: Vec<(Ident, Type)>,
+}
+
+impl Parse for PropsAttr {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let mut out = Self { module: None, pairs: Vec::new() };
+    while !input.is_empty() {
+      if input.peek2(Token![=]) {
+        let key: Ident = input.parse()?;
+        if key != "path" {
+          return Err(syn::Error::new_spanned(
+            &key,
+            "expected `path = <module>`; `path` is the only supported key",
+          ));
+        }
+        input.parse::<Token![=]>()?;
+        let module: Path = input.parse()?;
+        if out.module.replace(module).is_some() {
+          return Err(syn::Error::new_spanned(&key, "`path` may be specified at most once"));
+        }
+      } else {
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let ty: Type = input.parse()?;
+        out.pairs.push((name, ty));
+      }
+      if input.is_empty() {
+        break;
+      }
+      input.parse::<Token![,]>()?;
+    }
+    Ok(out)
+  }
+}
+
+fn expand_props(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+  let config: PropsAttr =
+    if attr.is_empty() { PropsAttr { module: None, pairs: Vec::new() } } else { parse2(attr)? };
+
+  let parsed: Item = match parse2(item.clone()) {
+    Ok(parsed) => parsed,
+    Err(_) => {
+      return Err(syn::Error::new_spanned(
+        item,
+        "`#[props]` can only be applied to a struct or a trait",
+      ));
+    }
+  };
+
+  match parsed {
+    Item::Struct(item_struct) => props_on_struct(item_struct, &config),
+    Item::Trait(item_trait) => props_on_trait(item_trait, &config),
+    _ => {
+      Err(syn::Error::new_spanned(parsed, "`#[props]` can only be applied to a struct or a trait"))
+    }
+  }
+}
+
+/// The path of a declared accessor trait: `module` + `_<Pascal(field)>`.
+fn trait_path(module: &Path, trait_name: &str) -> Path {
+  let mut path = module.clone();
+  path
+    .segments
+    .push(PathSegment { ident: format_ident!("_{}", trait_name), arguments: PathArguments::None });
+  path
+}
+
+/// `crate::_fields` — the conventional home of the `fields!` declarations.
+fn default_fields_path() -> Path {
+  parse_quote!(crate::_fields)
+}
+
+fn props_on_struct(mut item_struct: ItemStruct, config: &PropsAttr) -> syn::Result<TokenStream2> {
+  if !config.pairs.is_empty() {
+    return Err(syn::Error::new(
+      Span::call_site(),
+      "`#[props]` on a struct does not take `name: Type` pairs; \
+            apply it with no arguments (optionally `path = ..`) and mark fields with `#[prop]`",
+    ));
+  }
+
+  let module = config.module.clone().unwrap_or_else(default_fields_path);
+
+  match &mut item_struct.fields {
+    Fields::Named(fields_named) => {
+      let mut marked: Vec<(Ident, Type)> = Vec::new();
+      for field in fields_named.named.iter_mut() {
+        let positions: Vec<usize> = field
+          .attrs
+          .iter()
+          .enumerate()
+          .filter(|(_, attr)| attr.path().is_ident("prop"))
+          .map(|(idx, _)| idx)
+          .collect();
+        match positions[..] {
+          [] => {}
+          [pos] => {
+            let attr = field.attrs.remove(pos);
+            if !matches!(attr.meta, Meta::Path(_)) {
+              return Err(syn::Error::new_spanned(
+                attr,
+                "`#[prop]` does not take arguments; mark the field with a bare `#[prop]`",
+              ));
+            }
+            marked.push((field.ident.clone().expect("named field has an ident"), field.ty.clone()));
+          }
+          _ => {
+            return Err(syn::Error::new(
+              field.ident.as_ref().expect("named field has an ident").span(),
+              "a field cannot be marked with `#[prop]` more than once",
+            ));
+          }
+        }
+      }
+
+      let struct_ident = &item_struct.ident;
+      let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
+      let mut tokens = quote!(#item_struct);
+      for (field_ident, field_ty) in &marked {
+        let trait_name = trait_name_for(field_ident)?;
+        let base = method_base(field_ident);
+        let trait_path = trait_path(&module, &trait_name);
+        let get_ident = field_ident;
+        let set_ident = format_ident!("{}_set", base);
+        let mut_ident = format_ident!("{}_mut", base);
+
+        tokens.extend(quote! {
+            impl #impl_generics #trait_path<#field_ty> for #struct_ident #ty_generics #where_clause {
+                fn #get_ident(&self) -> &#field_ty {
+                    &self.#field_ident
+                }
+                fn #set_ident(&mut self, v: #field_ty) {
+                    self.#field_ident = v;
+                }
+                fn #mut_ident(&mut self) -> &mut #field_ty {
+                    &mut self.#field_ident
+                }
+            }
+        });
+      }
+      Ok(tokens)
+    }
+    Fields::Unnamed(_) | Fields::Unit => {
+      for field in item_struct.fields.iter() {
+        if let Some(attr) = field.attrs.iter().find(|attr| attr.path().is_ident("prop")) {
+          return Err(syn::Error::new_spanned(attr, "`#[prop]` only supports named struct fields"));
+        }
+      }
+      // nothing to mark on an unnamed or unit struct — pass the item through
+      Ok(quote!(#item_struct))
+    }
+  }
+}
+
+fn props_on_trait(mut item_trait: ItemTrait, config: &PropsAttr) -> syn::Result<TokenStream2> {
+  if config.pairs.is_empty() {
+    return Err(syn::Error::new(
+      Span::call_site(),
+      "`#[props]` on a trait requires at least one `name: Type` pair, \
+            e.g. `#[props(value: i32)]`",
+    ));
+  }
+
+  let module = config.module.clone().unwrap_or_else(default_fields_path);
+
+  let mut seen: BTreeSet<String> = BTreeSet::new();
+  for (name, ty) in &config.pairs {
+    let trait_name = trait_name_for(name)?;
+    if !seen.insert(trait_name.clone()) {
+      return Err(syn::Error::new(
+        name.span(),
+        format!("`{name}` maps to the accessor trait `_{trait_name}`, which is already bound"),
+      ));
+    }
+    let bound_path = trait_path(&module, &trait_name);
+    let bound: TypeParamBound = parse_quote!(#bound_path<#ty>);
+    if !item_trait.supertraits.is_empty() {
+      item_trait.supertraits.push_punct(<Token![+]>::default());
+    }
+    item_trait.supertraits.push_value(bound);
+  }
+  Ok(quote!(#item_trait))
 }

@@ -634,3 +634,158 @@ mod vis_kw {
     assert_eq!(s.w(), &3);
   }
 }
+
+// ---------------------------------------------------------------------------
+// field-based api (`fields!` + `#[props]`) — one crate-wide trait set declared
+// in `crate::_fields`, implemented from any module via `#[prop]` markers
+// ---------------------------------------------------------------------------
+
+// convention: declarations live in the file module `src/_fields.rs` —
+// `fields!` works in file modules too, unlike the scope-scanning marker api
+mod _fields;
+
+// a second declaration module, targeted via the `path = ..` override
+mod override_fields {
+  use duck_trait::fields;
+
+  fields! {
+    pub tag,
+  }
+}
+
+// same field name, different types, different modules — all share
+// crate::_fields::_Value
+mod props_remote {
+  #![allow(private_bounds)]
+
+  use duck_trait::props;
+
+  #[props]
+  pub struct Remote {
+    #[prop]
+    value: u64,
+  }
+
+  // binds to crate::_fields::_Value<u64> — the same trait `LocalValue` implements
+  #[props(value: u64)]
+  pub trait ShowValue {
+    fn show_value(&self) -> u64 {
+      *self.value()
+    }
+  }
+
+  impl ShowValue for Remote {}
+
+  pub fn make(value: u64) -> Remote {
+    Remote { value }
+  }
+}
+
+// new-api structs live in their own module: the old-api `ducks!` scope above
+// already defines a top-level `_Value` trait, and method resolution would be
+// ambiguous if both traits were in scope
+mod props_api {
+  use crate::_fields::_Value;
+  use duck_trait::props;
+
+  #[props]
+  struct PropsBasic {
+    #[prop]
+    value: i32,
+    #[prop]
+    name: String,
+    #[prop]
+    r#type: u8,
+    unmarked: bool,
+  }
+
+  #[props]
+  struct LocalValue {
+    #[prop]
+    value: u64,
+  }
+
+  #[props]
+  struct PropsWrapper<T: Clone> {
+    #[prop]
+    inner: T,
+  }
+
+  fn sum_values(a: &impl _Value<u64>, b: &impl _Value<u64>) -> u64 {
+    a.value() + b.value()
+  }
+
+  // the trait bound from `props_remote` serves types of this module out of the box
+  impl super::props_remote::ShowValue for LocalValue {}
+
+  #[cfg(test)]
+  #[test]
+  fn props_struct_accessors() {
+    use crate::_fields::{_Name, _Type};
+
+    let mut s = PropsBasic { value: 1, name: String::from("duck"), r#type: 2, unmarked: false };
+    *s.value_mut() += 41;
+    s.name_set(String::from("mallard"));
+    s.type_set(9);
+    assert_eq!(s.value(), &42);
+    assert_eq!(s.name(), "mallard");
+    assert_eq!(s.r#type(), &9);
+    assert!(!s.unmarked);
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn props_trait_shared_across_modules_and_types() {
+    use super::props_remote::ShowValue;
+
+    let mut remote = super::props_remote::make(5);
+    let mut local = LocalValue { value: 3 };
+    assert_eq!(sum_values(&remote, &local), 8);
+    remote.value_set(10);
+    local.value_set(20);
+    assert_eq!(remote.show_value(), 10);
+    assert_eq!(local.show_value(), 20);
+  }
+
+  #[cfg(test)]
+  #[test]
+  fn props_generic_struct() {
+    use crate::_fields::_Inner;
+
+    let mut w = PropsWrapper { inner: vec![1, 2] };
+    w.inner_mut().push(3);
+    assert_eq!(w.inner(), &vec![1, 2, 3]);
+    w.inner_set(Vec::new());
+    assert!(w.inner().is_empty());
+  }
+}
+
+mod props_override {
+  use duck_trait::props;
+
+  #[props(path = crate::override_fields)]
+  struct Tagged {
+    #[prop]
+    tag: String,
+  }
+
+  #[props(path = crate::override_fields, tag: String)]
+  trait ShowTag {
+    fn show_tag(&self) -> &str {
+      self.tag()
+    }
+  }
+
+  impl ShowTag for Tagged {}
+
+  #[cfg(test)]
+  #[test]
+  fn props_path_override() {
+    use super::override_fields::_Tag;
+
+    let mut t = Tagged { tag: String::from("mallard") };
+    assert_eq!(t.show_tag(), "mallard");
+    t.tag_set(String::from("duck"));
+    assert_eq!(t.show_tag(), "duck");
+  }
+}
