@@ -95,3 +95,7 @@ or via the VS Code UI: *Extensions* → *…* → *Install from VSIX…*.
 - `mod.rs` layouts and `#[path = ..]` module redirections are not resolved.
 - Workspace member globs support a single `*` level; nested globs and `{a,b}` alternatives are not
   expanded.
+
+## License
+
+Dual-licensed under [MIT](../LICENSE) or [Apache-2.0](../LICENSE-APACHE), at your option.

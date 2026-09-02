@@ -1,5 +1,7 @@
 //! `duck-trait` — stop repeating `get`/`set`/`get_mut` declarations in traits.
 //!
+//! SPDX-License-Identifier: MIT OR Apache-2.0
+//!
 //! Mark struct fields with `#[duck]` (public) or `#[_duck]` (private) inside a
 //! scope wrapped in `ducks! { .. }` (or annotated with `#[duck_mod]`), and the
 //! macros generate one accessor trait per field name together with the impls

@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Generate duck-typing accessor traits (get / set / get_mut) for struct fields marked with #[duck] or #[prop], eliminating repetitive getter/setter declarations in traits."
+description = "Generate duck-typing accessor traits (get / set / get_mut): declare once in _fields.rs with fields!, implement anywhere with #[props]/#[prop] — or use the scoped #[duck] marker api."
 keywords = ["proc-macro", "duck-typing", "getter", "setter", "accessor"]
 categories = ["development-tools::procedural-macro-helpers", "rust-patterns"]
 

@@ -1,5 +1,7 @@
 //! Verification project for duck-trait.
 //!
+//! SPDX-License-Identifier: MIT OR Apache-2.0
+//!
 //! Every fixture scope carries its own `#[cfg(test)]` tests next to the
 //! structs they exercise; visibility-specific fixtures live at the end.
 

@@ -36,303 +36,101 @@ impl Opr for A;
 impl Opr for B; 
 ```
 
-### Basic usage
+### Basic usage — `fields!` + `#[props]` / `#[prop]`
 
-```rust
-use duck_trait::ducks;
-
-/*-------- Generates traits and impls; code stays in top scope --------*/
-// ducks! can contain multiple structs or other code
-ducks! { 
-  pub struct A {
-    // Marks the field to generate accessors for.
-    // `duck` is a marker only; no import needed
-    #[duck] 
-    value: String,
-  }
-}
-
-// Convention: the field `xxx` generates the "_Xxx<T>" trait
-trait Opr: _Value<String> {
-  fn print_val(&self) {
-    // Read &xxx via xxx(), this case xxx is value
-    println!("{}", self.value());         
-  }
-
-  fn set_good(&mut self) {
-    // Set xxx via xxx_set(_)
-    self.value_set(String::from("good")); 
-  }
-
-  fn get_mut_val(&mut self) -> &str {
-    // Get &mut xxx via xxx_mut()
-    self.value_mut()                      
-  }
-}
-
-impl Opr for A {}
-```
-
-### Before / after expansion of `ducks! { .. }`
-
-```rust
-/*----------------- Before expansion -----------------*/
-ducks! { 
-  pub struct A {
-    // Marks the field to generate accessors for
-    #[duck] 
-    value: String,
-  }
-}
-/*----------------- After expansion -----------------*/
-pub(crate) trait _Value<T> {
-  fn value(&self) -> &T;
-  fn value_set(&mut self, v: T);
-  fn value_mut(&mut self) -> &mut T;
-}
-
-struct A {
-  value: String,
-}
-
-impl _Value<String> for A {
-  fn value(&self) -> &String {
-    &self.value
-  }
-  fn value_set(&mut self, v: String) {
-    self.value = v;
-  }
-  fn value_mut(&mut self) -> &mut String {
-    &mut self.value
-  }
-}
-```
-
-### Generated trait visibility
-
-```rust
-use duck_trait::ducks;
-
-ducks! {
-  pub struct Player {
-    // generates: pub(crate) trait _Name<T>
-    #[duck] 
-    name: String,
-    // generates: pub trait _Score<T>
-    #[duck(pub)] 
-    score: u32,
-    // generates: private trait _Title<T>
-    #[_duck] 
-    title: String,
-  }
-}
-
-// pub(crate): usable anywhere in the crate
-fn shout_name(player: &impl _Name<String>) {
-  println!("{}", player.name());
-}
-
-// pub: external crates can use it too,
-// e.g. as a supertrait of a public trait
-fn shout_score(player: &impl _Score<u32>) {
-  println!("{}", player.score());
-}
-
-// private: usable in this scope only
-fn shout_title(player: &impl _Title<String>) {
-  println!("{}", player.title());
-}
-```
-
-The marker chooses the visibility of the generated trait:
-
-| Marker                      | Generated trait visibility     |
-| --------------------------- | ------------------------------ |
-| `#[duck]`                   | `pub(crate)` (default)         |
-| `#[duck(pub)]`              | `pub`                          |
-| `#[duck(pub = crate)]`      | `pub(crate)`                   |
-| `#[duck(pub = super)]`      | `pub(super)`                   |
-| `#[duck(pub = self)]`       | `pub(self)`                    |
-| `#[duck(pub = crate::foo)]` | `pub(in crate::foo)`           |
-| `#[_duck]`                  | private to the declaring scope |
-
-- `#[duck]` defaults to `pub(crate)` so accessors work across the whole crate without exporting
-  them; `#[duck(pub)]` exports the trait for external users (e.g. as a supertrait of a public
-  trait).
-- The visibility item may sit anywhere in `#[duck(..)]`, next to custom trait paths
-  `#[duck(MyValue<_>, pub = super)]` — at most one visibility item per marker.
-- Markers can be mixed within one struct — each field's trait gets its own visibility
-
-- All structs sharing one trait must declare the same visibility; mismatched markers fail to
-  compile.
-- `pub = <path>` is rendered as `pub(in path)`; the path must start with `crate`, `super`, or
-  `self` and must be an ancestor module of the declaring struct.
-- Block scopes (function bodies, closures, ...) cannot carry visibility qualifiers, so they only
-  accept `#[_duck]`.
-- `#[_duck]` always generates a private trait and rejects `pub` items.
-
-### Custom accessors
-
-Inside a `#[duck_mod]` / `ducks!` scope, define `trait MyGetSet: _Xxx<some_type>` to create a custom accessor.
-
-Then use `#[duck(MyGetSet)]` or `#[duck(MyGetSet<_>)]` (for custom traits with generics) to generate the code.
-
-(PS: in `#[duck(MyGetSet<_>)]`, `_` is the placeholder for the type of the decorated `value` field.)
-
-```rust
-use duck_trait::ducks;
-/*----------------- Before expansion -----------------*/
-ducks! {
-  pub struct B {
-    // Additionally generates impl MyValue<String> for B
-    #[duck(MyValue<_>)] 
-    value: String,
-  }
-}
-// The custom trait binds to the field type
-// via `_Value<some_type>`
-trait MyValue<V>: _Value<V> {
-  // In Rust, a method cannot share its name
-  // with the supertrait (_Value);
-  // so just pick a nice name yourself
-  fn my_get(&self) -> &V {
-    // Put your extra logic here
-    self.value()
-  }
-}
-
-let b = B { value: String::from("good") };
-b.my_get();
-b.value(); // Still works
-
-/*----------------- After expansion -----------------*/
-pub struct B {
-  value: String,
-}
-
-pub(crate) trait MyValue<V>: _Value<V> {
-  fn my_get(&self) -> &V {
-    self.value()
-  }
-}
-
-pub(crate) trait _Value<T> {
-  fn value(&self) -> &T;
-  fn value_set(&mut self, v: T);
-  fn value_mut(&mut self) -> &mut T;
-}
-
-impl _Value<String> for B {
-  fn value(&self) -> &String {
-    &self.value
-  }
-  fn value_set(&mut self, v: String) {
-    self.value = v;
-  }
-  fn value_mut(&mut self) -> &mut String {
-    &mut self.value
-  }
-}
-
-// All MyValue methods have default impls,
-// so the generated impl is empty
-impl MyValue<String> for B {}
-
-let b = B { value: String::from("good") };
-b.my_get();
-b.value();
-```
-
-A bare `_` placeholder inside `(..)` is replaced with the type of the decorated field; all other
-arguments are kept as-is (you may reference the struct's own generic parameters):
-
-| Marker (field `value: String`) | Generated                        |
-| ------------------------------ | -------------------------------- |
-| `#[duck(MyValue)]`             | `impl MyValue for B`             |
-| `#[duck(MyValue<_>)]`          | `impl MyValue<String> for B`     |
-| `#[duck(MyValue<u8, _>)]`      | `impl MyValue<u8, String> for B` |
-
-- `_` always equals the field type: the supertrait bound guarantees only the field type can satisfy
-  `_Value<V>`; any other type fails to compile.
-- Generic structs work the same way: `struct Wrapper<T: Clone> { #[duck(MyValue<_>)] inner: T }`
-  generates `impl<T: Clone> MyValue<T> for Wrapper<T>`.
-- The auto-generated impl requires every method of the custom trait to have a default implementation;
-  otherwise use a plain `#[duck]` marker and hand-write `impl MyValue<String> for B {}` in the same
-  scope.
-- `_` only supports a bare placeholder (e.g. the `_` in `MyValue<Vec<_>>` is not replaced).
-
-### Duplicate field names reuse the same trait
-
-```rust
-use duck_trait::ducks;
-
-ducks! {
-  pub struct A {
-    #[duck]
-    value: String,
-  }
-
-  pub struct B {
-    #[duck]
-    value: i32,
-  }
-
-  // A single generic function accepts both structs —
-  // this is exactly the point of "duck typing"
-  fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
-    format!("{:?}", x.value())
-  }
-}
-```
-
-### Field-based api — `fields!` + `#[props]`
-
-The marker api above generates traits where the struct is declared, so a trait consumer in another
-file must path-qualify the generated trait. The field-based api declares every accessor trait once
-in a dedicated module (by convention `crate::_fields`), and structs anywhere in the crate implement
-those shared traits — one trait per field name across the whole crate:
+By convention the accessors are declared once in `src/_fields.rs`:
 
 ```rust
 use duck_trait::{fields, props};
 
-// convention: `mod _fields;` + `src/_fields.rs` holds every declaration
-mod _fields {
-  use duck_trait::fields;
-
-  fields! {
-    value,    // pub(crate) trait _Value<T>
-    pub name, // pub trait _Name<T>
-  }
+// 1. src/_fields.rs declares the accessor traits
+use duck_trait::fields;
+fields! {
+  value,    // pub(crate) trait _Value<T> ...
+  pub name, // pub trait _Name<T> ...
 }
 
-// traits bind to the declared accessors via `name: Type` pairs
+// 2. inherit the accessors via name: type
+// no import needed — the macro adds it for you
+// value: i32 maps to _Value<i32>
 #[props(value: i32)]
-trait Show {
-  fn show(&self) -> i32 {
-    *self.value()
+trait Foo {
+  fn access(&self) {
+    // you get the following 3 methods
+    // read &i32
+    *self.value();
+    // read &mut i32
+    self.value_mut();
+    // set value
+    self.value_set(99);
   }
 }
 
-// structs marked with `#[prop]` implement the declared traits
+// 3. #[prop] makes the struct implement _Value<i32>
+// no import needed — the macro adds it for you
 #[props]
 struct Player {
   #[prop]
   value: i32,
 }
 
-impl Show for Player {}
+impl Foo for Player {}
 ```
 
-- `fields!` derives trait and method names from the field name with the same naming conventions as
-  the marker api; visibility defaults to `pub(crate)`, and any qualifier written before the name
-  (`pub`, `pub(crate)`, `pub(super)`, …) is applied to its trait.
-- `#[props]` on a struct strips the `#[prop]` markers and generates
-  `impl crate::_fields::_Value<i32> for Player`; override the module with
-  `#[props(path = crate::my_fields)]`.
-- `#[props]` on a trait appends one supertrait bound per `name: Type` pair, so default methods can
-  use the accessors without any imports.
-- A `#[prop]` field whose name was never declared fails to resolve its trait at the impl site —
-  the declaration list is the single source of truth.
+**Limitations**: a `#[prop]` field removed entirely by `#[cfg]` breaks the generated impl; avoid
+mixing the marker api ([readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md)) and the field-based api for the same
+field name in one crate (method resolution would be ambiguous).
+
+### LLM
+
+Add the following prompt to your project's `AGENTS.md`:
+
+````markdown
+### Simplify accessor code with duck-trait
+1. only declare the accessor traits in src/_fields.rs
+```rust
+use duck_trait::fields;
+fields! {
+  value,    // pub(crate) trait _Value<T> ...
+  pub name, // pub trait _Name<T> ...
+}
+```
+2. inherit the accessors via name: type
+```rust
+#[props(value: i32)]
+trait Foo {
+  fn access(&self) {
+    // you get the following 3 methods
+    // read &i32
+    *self.value();
+    // read &mut i32
+    self.value_mut();
+    // set value
+    self.value_set(99);
+  }
+}
+```
+3. #[prop] makes the struct implement the trait
+```rust
+#[props]
+struct Player {
+  #[prop]
+  value: i32,
+}
+impl Foo for Player {}
+```
+````
+
+### VS Code extension
+
+Install the `duck-trait` extension to keep `_fields.rs` in sync:
+
+quick fixes on the unresolved-trait errors,
+
+and `Cmd+Shift+P` commands — declare the missing fields of the current file or the whole crate,
+
+scaffold the declaration file, and wire up `mod` declarations, in monorepos and non-`src` layouts
+too.
 
 ### Naming conventions
 
@@ -343,47 +141,33 @@ impl Show for Player {}
 | `r#type`   | `_Type<T>`      | `r#type()` / `type_set(v)` / `type_mut()`  |
 
 - Trait name: the field name converted to UpperCamelCase with a `_` prefix.
-- Within the same scope, all structs with the same field name share one trait; different scopes each
-  generate their own.
+- The same field name maps to the same trait everywhere, regardless of the field type — that is
+  the whole point of the duck typing.
 - The setter takes the value by value and returns `()`.
 
-### Supported features and limitations
+### Notes
 
-**Supported**
-
-- Generic structs (including where clauses): `struct Wrapper<T: Clone> { #[duck] inner: T }` generates
-  `impl<T: Clone> _Inner<T> for Wrapper<T>`.
-- `#[duck(MyTrait(..))]`: in addition to the accessors, automatically implements the custom trait for
-  the struct, with the `_` placeholder equal to the field type (supported by both `#[duck_mod]` and
-  `ducks!`).
-- Trait visibility: `#[duck]` defaults to `pub(crate)`; `#[duck(pub)]` / `#[duck(pub = ..)]` set
-  `pub` or restricted visibility; `#[_duck]` keeps the trait private (see "Trait visibility").
-- Recursively processes nested inline modules and block scopes: function bodies, closures,
-  `unsafe`/`async`/`const` blocks, loop/`if`/`match` branch blocks and method bodies each get their
-  own set of traits, generated inside the scope where the struct is declared.
-- Detects `_Xxx` naming conflicts before generation and emits a clear compile error on conflict.
-
-**Limitations**
-- The auto impl of `#[duck(MyTrait(..))]` requires every method of the custom trait to have a default
-  implementation.
-- Cannot scan the contents of `mod foo;` file modules (rustc does not pass file contents to macros).
-  Use `ducks! { .. }` inside the file or switch to an inline module.
-- Other macro invocations inside the scope are opaque: structs produced by a sibling macro cannot be
-  scanned.
-- Block scopes only accept `#[_duck]`: generated items there cannot carry visibility qualifiers
-  (rustc E0449).
-- All fields sharing one trait must declare the same visibility; mismatched markers fail to compile.
-- If a field name clashes with an existing method (e.g. `clone`), call sites may hit method resolution
-  ambiguity — an inherent behavior of Rust trait methods.
+- `fields!` derives trait and method names from the field name (see "Naming conventions");
+  visibility defaults to `pub(crate)`, and any qualifier written before the name (`pub`,
+  `pub(crate)`, `pub(super)`, …) is applied to its trait.
+- `#[props]` on a struct strips the `#[prop]` markers and generates
+  `impl crate::_fields::_Value<i32> for Player`; override the module with
+  `#[props(path = crate::my_fields)]`.
+- `#[props]` on a trait appends one supertrait bound per `name: Type` pair, so default methods
+  can use the accessors without any imports.
+- A `#[prop]` field whose name was never declared fails to resolve its trait at the impl site —
+  the declaration list is the single source of truth.
 
 ### Project structure
 
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # Publishable proc-macro crate (duck_mod / ducks / duck)
+│   ├── duck-trait    # Publishable proc-macro crate
 │   └── verify        # Verification project (fixtures + tests)
-└── readme.md
+├── editors/code      # VS Code extension (quick fixes + palette commands)
+├── readme.md         # This file — the field-based api
+└── readme-duck.md    # The marker api (`#[duck]` / `ducks!` / `#[duck_mod]`)
 ```
 
 ### Running verification
@@ -395,74 +179,17 @@ cargo clippy --all-targets        # Static checks
 
 Requires Rust 1.85+ (edition 2024).
 
-### Attribute form #[duck_mod]`
+### License
 
-`#[duck_mod]` is the equivalent attribute-macro form of `ducks!`, applied to an inline module; the
-generated traits (defaulting to `pub(crate)`) stay inside the module namespace.
-`ducks! { .. }` is preferred; the following `#[duck_mod]` examples correspond one-to-one with the
-usages shown above.
+Licensed under either of [MIT](https://github.com/smooth-cat/duck-trait/blob/main/LICENSE) or
+[Apache-2.0](https://github.com/smooth-cat/duck-trait/blob/main/LICENSE-APACHE) at your option.
 
-```rust
-use duck_trait::duck_mod;
+### The marker api — `#[duck]` / `ducks!`
 
-#[duck_mod] // Generates the traits and impls
-mod model {
-  pub struct A {
-    #[duck] // Marks the field
-    value: String,
-  }
-
-  // Convention: the field `value` generates the "_Value" trait
-  // (generic over the field type T)
-  pub trait Opr: _Value<String> {
-    fn print_val(&self) {
-      // Read &value via value()
-      println!("{}", self.value());
-    }
-
-    fn set_good(&mut self) {
-      // Set the value via value_set(xxx)
-      self.value_set(String::from("good"));
-    }
-
-    fn get_mut_val(&mut self) -> &str {
-      // Get &mut value via value_mut()
-      self.value_mut()
-    }
-  }
-
-  impl Opr for A {}
-}
-```
-
-The same rule — duplicate field names reusing one trait (traits are generated per scope) — holds here
-as well:
-
-```rust
-use duck_trait::duck_mod;
-
-#[duck_mod]
-mod model {
-  pub struct A {
-    #[duck]
-    value: String,
-  }
-
-  pub struct B {
-    #[duck]
-    value: i32,
-  }
-
-  // A single generic function accepts both structs —
-  // this is exactly the point of "duck typing"
-  pub fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
-    format!("{:?}", x.value())
-  }
-}
-```
-
-- `#[duck_mod]` can only be applied to inline modules (`mod name { .. }`); it cannot scan file modules
-  (`mod name;`, see "Supported features and limitations").
+The marker api generates the traits in the scope where the struct is declared: mark fields with
+`#[duck]` / `#[_duck]` (with visibility and custom-trait options) inside `ducks! { .. }` /
+`#[duck_mod]` scopes. The full documentation lives in
+[readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md).
 
 [中文](#user-content-中文) | [English](#user-content-english)
 
@@ -502,295 +229,99 @@ impl Opr for A;
 impl Opr for B;
 ```
 
-### 基础用法
+### 基础用法 —— `fields!` + `#[props]` / `#[prop]`
 
-```rust
-use duck_trait::ducks;
-
-/*----------------- 生成 trait 与 impl，代码仍在顶级作用域 -----------------*/
-// ducks! 内可以放多个 struct 或 其他代码
-ducks! { 
-  pub struct A {
-    // 标记要生成访问器的字段；
-    // duck 仅作为标记，不需要被引入
-    #[duck]
-    value: String,
-  }
-}
-// 约定：自动为字段 xxx 生成 “_Xxx<T>” trait
-trait Opr: _Value<String> {
-  fn print_val(&self) {
-    // 通过 xxx() 获取 &xxx 此处为 &value
-    println!("{}", self.value());         
-  }
-
-  fn set_good(&mut self) {
-    // 通过 xxx_set(_) 设置值
-    self.value_set(String::from("good")); 
-  }
-
-  fn get_mut_val(&mut self) -> &str {
-    // 通过 xxx_mut() 获取 &mut xxx
-    self.value_mut()                      
-  }
-}
-
-impl Opr for A {}
-```
-
-### `ducks! { .. }` 展开前后对比
-
-```rust
-/*----------------- 展开前 -----------------*/
-ducks! { 
-  pub struct A {
-    // 标记要生成访问器的字段
-    #[duck] 
-    value: String,
-  }
-}
-/*----------------- 展开后 -----------------*/
-pub(crate) trait _Value<T> {
-  fn value(&self) -> &T;
-  fn value_set(&mut self, v: T);
-  fn value_mut(&mut self) -> &mut T;
-}
-
-struct A {
-  value: String,
-}
-
-impl _Value<String> for A {
-  fn value(&self) -> &String {
-    &self.value
-  }
-  fn value_set(&mut self, v: String) {
-    self.value = v;
-  }
-  fn value_mut(&mut self) -> &mut String {
-    &mut self.value
-  }
-}
-```
-
-### 生成的 trait 可见性
-
-```rust
-use duck_trait::ducks;
-
-ducks! {
-  pub struct Player {
-    // 生成: pub(crate) trait _Name<T>
-    #[duck] 
-    name: String,
-    // 生成: pub trait _Score<T>
-    #[duck(pub)] 
-    score: u32,
-    // 生成: 私有 trait _Title<T>
-    #[_duck] 
-    title: String,
-  }
-}
-
-// pub(crate)：crate 内任何地方都可用
-fn shout_name(player: &impl _Name<String>) {
-  println!("{}", player.name());
-}
-
-// pub：外部 crate 也能使用，
-// 比如作为公开 trait 的 supertrait
-fn shout_score(player: &impl _Score<u32>) {
-  println!("{}", player.score());
-}
-
-// 私有：仅当前作用域内可用
-fn shout_title(player: &impl _Title<String>) {
-  println!("{}", player.title());
-}
-```
-
-由标记决定生成 trait 的可见性：
-
-| 标记                        | 生成 trait 的可见性      |
-| --------------------------- | ------------------------ |
-| `#[duck]`                   | `pub(crate)`（默认）     |
-| `#[duck(pub)]`              | `pub`                    |
-| `#[duck(pub = crate)]`      | `pub(crate)`             |
-| `#[duck(pub = super)]`      | `pub(super)`             |
-| `#[duck(pub = self)]`       | `pub(self)`              |
-| `#[duck(pub = crate::foo)]` | `pub(in crate::foo)`     |
-| `#[_duck]`                  | 私有，仅声明作用域内可见 |
-
-- `#[duck]` 默认生成 `pub(crate)`，访问器在整个 crate 内可用且不会导出到外部；需要给外部使用
-  （如作为公开 trait 的 supertrait）时用 `#[duck(pub)]`。
-- 可见性项在 `#[duck(..)]` 中位置任意，可与自定义 trait path 混排
-  `#[duck(MyValue<_>, pub = super)]`，但最多写一个。
-- 一个 struct 内可以混用不同可见性的标记，每个字段的 trait 各自独立
-
-- 共享同一个 trait 的所有 struct 必须声明相同可见性，不一致会编译报错。
-- `pub = <path>` 渲染为 `pub(in path)`；path 必须以 `crate`、`super` 或 `self` 开头，且必须是
-  声明 struct 的祖先模块。
-- 块级作用域（函数体、闭包等）内的 item 不能带可见性修饰符，只接受 `#[_duck]`。
-- `#[_duck]` 永远生成私有 trait，并拒绝 `pub` 项。
-
-### 自定义 访问器
-
-在 `#[duck_mod]` / `ducks!` 作用域内，
-
-通过 `trait MyGetSet: _Xxx<some_type>` 来自定义访问器。
-
-此时使用  `#[duck(MyGetSet)]`  或  `#[duck(MyGetSet<_>)]` (自定义 trait 有泛型的场景) 来生成代码。
-
-(PS:  `#[duck(MyGetSet<_>)]` 中 `_` 代表被修饰的 value 的类型占位符)
-
-```rust
-use duck_trait::ducks;
-/*----------------- 展开前 -----------------*/
-ducks! {
-  pub struct B {
-    // 额外生成 impl MyValue<String> for B
-    #[duck(MyValue<_>)] 
-    value: String,
-  }
-}
-// 自定义 trait 通过 _Value<some_type> 绑定到字段类型
-trait MyValue<V>: _Value<V> {
-  // rust 中你不能声明与 supertrait 即 _Value 同名的函数，
-  // 所以自己取个好听的名字即可
-  fn my_get(&self) -> &V {
-    // 这里写你的额外逻辑
-    self.value()
-  }
-}
-
-let b = B { value: String::from("good") };
-b.my_get();
-b.value(); // 依然可以工作
-
-/*----------------- 展开后 -----------------*/
-pub struct B {
-  value: String,
-}
-
-pub(crate) trait MyValue<V>: _Value<V> {
-  fn my_get(&self) -> &V {
-    self.value()
-  }
-}
-
-pub(crate) trait _Value<T> {
-  fn value(&self) -> &T;
-  fn value_set(&mut self, v: T);
-  fn value_mut(&mut self) -> &mut T;
-}
-
-impl _Value<String> for B {
-  fn value(&self) -> &String {
-    &self.value
-  }
-  fn value_set(&mut self, v: String) {
-    self.value = v;
-  }
-  fn value_mut(&mut self) -> &mut String {
-    &mut self.value
-  }
-}
-
-// MyValue 的所有方法均有默认实现，
-// 因此自动生成的 impl 为空
-impl MyValue<String> for B {}
-
-let b = B { value: String::from("good") };
-b.my_get();
-b.value();
-```
-
-`(..)` 中裸写的 `_` 占位符会被替换为被标记字段的类型，其余实参原样保留（可引用 struct 自身
-的泛型参数）：
-
-| 标记（字段 `value: String`） | 生成                             |
-| ---------------------------- | -------------------------------- |
-| `#[duck(MyValue)]`           | `impl MyValue for B`             |
-| `#[duck(MyValue<_>)]`        | `impl MyValue<String> for B`     |
-| `#[duck(MyValue<u8, _>)]`    | `impl MyValue<u8, String> for B` |
-
-- `_` 永远等于字段类型：supertrait 约束决定了只有字段类型能满足 `_Value<V>`，填其他类型无法
-  编译。
-- 泛型 struct 同理：`struct Wrapper<T: Clone> { #[duck(MyValue<_>)] inner: T }` 生成
-  `impl<T: Clone> MyValue<T> for Wrapper<T>`。
-- 自动生成的 impl 要求自定义 trait 的所有方法都有默认实现；否则请使用纯 `#[duck]` 标记，并在
-  同一作用域内手写 `impl MyValue<String> for B {}`。
-- `_` 只支持裸占位（如 `MyValue<Vec<_>>` 中的 `_` 不会被替换）。
-
-### 出现重复字段名时会复用同一个 trait
-
-```rust
-use duck_trait::ducks;
-
-ducks! {
-  pub struct A {
-    #[duck]
-    value: String,
-  }
-
-  pub struct B {
-    #[duck]
-    value: i32,
-  }
-
-  // 一个泛型函数同时接受两个 struct ——
-  // 这正是“鸭子类型”的意义
-  fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
-    format!("{:?}", x.value())
-  }
-}
-```
-
-### 基于字段声明的 api —— `fields!` + `#[props]`
-
-上面的标记 api 会在 struct 所在作用域生成 trait，其他文件里的 trait 使用方必须通过路径限定引用它。
-基于字段声明的 api 则把所有访问器 trait 集中声明到一个模块（约定为 `crate::_fields`），crate 内任意
-位置的 struct 都实现这组共享 trait——每个字段名全 crate 只有一个 trait：
+约定在 `src/_fields.rs` 中统一声明访问器：
 
 ```rust
 use duck_trait::{fields, props};
 
-// 约定：`mod _fields;` + `src/_fields.rs` 集中存放所有声明
-mod _fields {
-  use duck_trait::fields;
-
-  fields! {
-    value,    // pub(crate) trait _Value<T>
-    pub name, // pub trait _Name<T>
-  }
+// 1. src/_fields.rs 声明访问器 trait
+use duck_trait::fields;
+fields! {
+  value,    // pub(crate) trait _Value<T> ...
+  pub name, // pub trait _Name<T> ...
 }
 
-// trait 通过 `name: Type` 对绑定到声明的访问器
+// 2. 通过 name: type 继承访问器
+// 不需要引入，宏会自动帮忙引入
+// value: i32 对应 _Value<i32>
 #[props(value: i32)]
-trait Show {
-  fn show(&self) -> i32 {
-    *self.value()
+trait Foo {
+  fn access(&self) {
+    // 你获得了以下 3 个方法
+    // 获取 &i32
+    *self.value();
+    // 获取 &mut i32
+    self.value_mut();
+    // 设置 value
+    self.value_set(99);
   }
 }
 
-// 用 `#[prop]` 标记字段的 struct 自动实现声明的 trait
+// 3. #[prop] 标记会实现 _Value<i32> trait
+// 不需要引入，宏会自动帮忙引入
 #[props]
 struct Player {
   #[prop]
   value: i32,
 }
 
-impl Show for Player {}
+impl Foo for Player {}
 ```
 
-- `fields!` 按字段名推导 trait 与方法名，命名约定与标记 api 一致；可见性默认 `pub(crate)`，
-  在名字前写任意限定符（`pub`、`pub(crate)`、`pub(super)`、…）会应用到对应的 trait。
-- `#[props]` 用于 struct 时剥离 `#[prop]` 标记并生成
-  `impl crate::_fields::_Value<i32> for Player`；用 `#[props(path = crate::my_fields)]`
-  可覆盖声明所在的模块。
-- `#[props]` 用于 trait 时为每个 `name: Type` 对追加一个 supertrait bound，默认方法无需任何
-  import 即可使用访问器。
-- 未在 `fields!` 中声明的 `#[prop]` 字段会在 impl 处报 unresolved trait——声明列表是唯一的事实来源。
+**限制**：被 `#[cfg]` 整体移除的 `#[prop]` 字段会导致生成的 impl 编译失败；避免在同一 crate
+中对同名字段混用标记 api（[readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md)）与字段声明 api（方法解析会歧义）。
+
+### LLM
+
+在项目的 `AGENTS.md` 加以下提示词
+
+````markdown
+### 使用 duck-trait 简化访问器代码
+1. src/_fields.rs 只能声明访问器 trait
+```rust
+use duck_trait::fields;
+fields! {
+  value,    // pub(crate) trait _Value<T> ...
+  pub name, // pub trait _Name<T> ...
+}
+```
+2. 通过 name: type 继承访问器
+```rust
+#[props(value: i32)]
+trait Foo {
+  fn access(&self) {
+    // 你获得了以下 3 个方法
+    // 获取 &i32
+    *self.value();
+    // 获取 &mut i32
+    self.value_mut();
+    // 设置 value
+    self.value_set(99);
+  }
+}
+```
+3. #[prop] 标记会实现 trait
+```rust
+#[props]
+struct Player {
+  #[prop]
+  value: i32,
+}
+impl Foo for Player {}
+```
+````
+
+### VS Code 插件
+
+安装 `duck-trait` 插件帮你保持 `_fields.rs` 同步：
+
+针对 unresolved trait 错误的 quick fix，
+
+以及 `Cmd+Shift+P` 命令——补充当前文件/整个 crate 缺失的字段、创建声明文件、
+
+写入 `mod` 声明，monorepo 与非 `src` 布局同样支持。
 
 ### 命名约定
 
@@ -801,40 +332,30 @@ impl Show for Player {}
 | `r#type`   | `_Type<T>`    | `r#type()` / `type_set(v)` / `type_mut()`   |
 
 - trait 名：字段名转大驼峰并加 `_` 前缀。
-- 同一作用域内，相同字段名的所有 struct 共享同一个 trait；不同作用域各自独立生成。
+- 相同字段名映射到同一个 trait，与字段类型无关——这正是鸭子类型的意义。
 - setter 接收值并返回 `()`。
 
-### 支持与限制
+### 注意事项
 
-**支持**
-
-- 泛型 struct（含 where 子句）：`struct Wrapper<T: Clone> { #[duck] inner: T }` 会生成
-  `impl<T: Clone> _Inner<T> for Wrapper<T>`。
-- `#[duck(MyTrait(..))]`：在访问器之外额外为该 struct 自动实现自定义 trait，`_` 占位符等于
-  字段类型（`#[duck_mod]` 与 `ducks!` 均支持）。
-- trait 可见性：`#[duck]` 默认 `pub(crate)`；`#[duck(pub)]` / `#[duck(pub = ..)]` 可设为 `pub`
-  或受限可见性；`#[_duck]` 保持私有（见「trait 可见性」）。
-- 递归处理嵌套的内联模块与块级作用域：函数体、闭包、`unsafe`/`async`/`const` 块、
-  loop/`if`/`match` 分支块、方法体各自生成一组 trait，且生成在 struct 所在的作用域内。
-- 生成前检测 `_Xxx` 命名冲突，冲突时给出明确的编译错误。
-
-**限制**
-- `#[duck(MyTrait(..))]` 的自动 impl 要求自定义 trait 所有方法均有默认实现。
-- 无法扫描 `mod foo;` 文件模块的内容（rustc 不会把文件内容传给宏）。请在文件内使用
-  `ducks! { .. }` 或改用内联模块。
-- 作用域内的其他宏调用是不透明的：兄弟宏生成的 struct 无法被扫描。
-- 块级作用域只接受 `#[_duck]`：其中生成的 item 不能带可见性修饰符（rustc E0449）。
-- 共享同一个 trait 的所有字段必须声明相同可见性，不一致会编译报错。
-- 字段名若与既有方法重名（如 `clone`），调用处可能出现方法解析歧义，这是 Rust trait 方法的固有行为。
+- `fields!` 按字段名推导 trait 与方法名（见「命名约定」）；可见性默认 `pub(crate)`，在名字前
+  写任意限定符（`pub`、`pub(crate)`、`pub(super)`、…）会应用到对应的 trait。
+- `#[props]` 用于 struct 时剥离 `#[prop]` 标记并生成
+  `impl crate::_fields::_Value<i32> for Player`；用 `#[props(path = crate::my_fields)]`
+  可覆盖声明所在的模块。
+- `#[props]` 用于 trait 时为每个 `name: Type` 对追加一个 supertrait bound，默认方法无需任何
+  import 即可使用访问器。
+- 未在 `fields!` 中声明的 `#[prop]` 字段会在 impl 处报 unresolved trait——声明列表是唯一的事实来源。
 
 ### 项目结构
 
 ```
 duck-trait
 ├── crates
-│   ├── duck-trait    # 可发布的 proc-macro crate（duck_mod / ducks / duck）
+│   ├── duck-trait    # 可发布的 proc-macro crate
 │   └── verify        # 验证项目（fixture + 测试）
-└── readme.md
+├── editors/code      # VS Code 插件（quick fix + 命令面板指令）
+├── readme.md         # 本文件 —— 基于字段声明的 api
+└── readme-duck.md    # 标记 api（`#[duck]` / `ducks!` / `#[duck_mod]`）
 ```
 
 ### 运行验证
@@ -846,68 +367,13 @@ cargo clippy --all-targets        # 静态检查
 
 需要 Rust 1.85+（edition 2024）。
 
-### 属性形式 `#[duck_mod]`
+### 许可证
 
-`#[duck_mod]` 是 `ducks!` 的等价属性宏形式，作用于内联模块，生成的 trait（默认 `pub(crate)`）
-保持在模块命名空间内。
-推荐优先使用 `ducks! { .. }`；以下 `#[duck_mod]` 示例与前面的用法一一对应。
+采用 [MIT](https://github.com/smooth-cat/duck-trait/blob/main/LICENSE) 或
+[Apache-2.0](https://github.com/smooth-cat/duck-trait/blob/main/LICENSE-APACHE) 双许可，任选其一。
 
-```rust
-use duck_trait::duck_mod;
+### 标记 api —— `#[duck]` / `ducks!`
 
-#[duck_mod] // 负责生成 trait 与 impl
-mod model {
-  pub struct A {
-    #[duck] // 标记字段
-    value: String,
-  }
-
-  // 约定：字段 value 生成 “_Value” 访问器 trait（对字段类型 T 泛型）
-  pub trait Opr: _Value<String> {
-    fn print_val(&self) {
-      // 通过 value() 获取 &value
-      println!("{}", self.value());
-    }
-
-    fn set_good(&mut self) {
-      // 通过 value_set(xxx) 设置值
-      self.value_set(String::from("good"));
-    }
-
-    fn get_mut_val(&mut self) -> &str {
-      // 通过 value_mut() 获取 &mut value
-      self.value_mut()
-    }
-  }
-
-  impl Opr for A {}
-}
-```
-
-重复字段名复用同一个 trait 的规则同样成立（trait 按作用域生成）：
-
-```rust
-use duck_trait::duck_mod;
-
-#[duck_mod]
-mod model {
-  pub struct A {
-    #[duck]
-    value: String,
-  }
-
-  pub struct B {
-    #[duck]
-    value: i32,
-  }
-
-  // 一个泛型函数同时接受两个 struct ——
-  // 这正是“鸭子类型”的意义
-  pub fn debug_value<T: std::fmt::Debug>(x: &impl _Value<T>) -> String {
-    format!("{:?}", x.value())
-  }
-}
-```
-
-- `#[duck_mod]` 只能作用于内联模块（`mod name { .. }`），无法扫描文件模块
-  （`mod name;`，见「支持与限制」）。
+标记 api 会在 struct 所在作用域生成 trait：在 `ducks! { .. }` / `#[duck_mod]` 作用域内用
+`#[duck]` / `#[_duck]` 标记字段（支持可见性与自定义 trait 选项）。完整文档见
+[readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md)。
