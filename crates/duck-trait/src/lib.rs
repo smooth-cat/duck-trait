@@ -32,7 +32,8 @@
 //! trait consumer in another file must path-qualify the generated trait. The
 //! field-based api instead declares every accessor trait once in a dedicated
 //! module (by convention `crate::_fields`), and `#[props]` generates impls
-//! against those declarations from any file in the crate:
+//! against those declarations from any file in the crate — for **every** named
+//! field, ignored ones marked with `#[_prop]`:
 //!
 //! ```
 //! use duck_trait::{fields, props};
@@ -55,11 +56,12 @@
 //!     }
 //! }
 //!
-//! // structs marked with `#[prop]` implement the declared traits
+//! // every field generates accessors by default; #[_prop] opts a field out
 //! #[props]
 //! struct Player {
-//!     #[prop]
 //!     value: i32,
+//!     #[_prop]
+//!     hidden: u8,
 //! }
 //!
 //! impl Show for Player {}
@@ -67,7 +69,7 @@
 //! fn main() {
 //!     use _fields::_Value;
 //!
-//!     let mut player = Player { value: 1 };
+//!     let mut player = Player { value: 1, hidden: 0 };
 //!     player.value_set(2);
 //!     assert_eq!(player.show(), 2);
 //! }
@@ -1013,10 +1015,11 @@ pub fn fields(item: TokenStream) -> TokenStream {
 
 /// Field-based entry point for structs and traits.
 ///
-/// **On a struct** — strips the `#[prop]` field markers and generates one
-/// accessor-trait impl per marked field, bound to the trait declared for that
-/// field name in the `fields!` module. The trait is looked up under
-/// `crate::_fields` unless overridden with `path = ..`:
+/// **On a struct** — generates one accessor-trait impl for **every** named
+/// field, bound to the trait declared for that field name in the `fields!`
+/// module. The trait is looked up under `crate::_fields` unless overridden
+/// with `path = ..`. Fields that should NOT get accessors are ignored with
+/// `#[_prop]`:
 ///
 /// ```
 /// use duck_trait::{fields, props};
@@ -1029,15 +1032,15 @@ pub fn fields(item: TokenStream) -> TokenStream {
 ///
 /// #[props]
 /// struct S {
-///     #[prop]
 ///     value: u8,
-///     unmarked: u8,
+///     #[_prop]
+///     ignored: u8,
 /// }
 ///
 /// fn main() {
 ///     use _fields::_Value;
 ///
-///     let mut s = S { value: 1, unmarked: 2 };
+///     let mut s = S { value: 1, ignored: 2 };
 ///     *s.value_mut() += 1;
 ///     assert_eq!(s.value(), &2);
 /// }
@@ -1069,7 +1072,6 @@ pub fn fields(item: TokenStream) -> TokenStream {
 ///
 /// #[props]
 /// struct S {
-///     #[prop]
 ///     value: i32,
 /// }
 ///
@@ -1082,22 +1084,36 @@ pub fn fields(item: TokenStream) -> TokenStream {
 ///
 /// Rules enforced at compile time:
 ///
-/// - A `#[prop]` field whose name was never declared with [`fields`] fails to
-///   resolve its trait at the impl site:
+/// - A field that is not ignored with `#[_prop]` must have its name declared
+///   with [`fields`], otherwise its trait fails to resolve at the impl site:
 ///
 /// ```compile_fail
 /// use duck_trait::props;
 ///
 /// #[props]
 /// struct S {
-///     #[prop]
 ///     value: u8, // error: no `_Value` trait declared in `crate::_fields`
 /// }
 ///
 /// fn main() {}
 /// ```
 ///
-/// - `#[prop]` takes no arguments:
+/// - The old opt-in marker `#[prop]` no longer exists — fields generate
+///   accessors by default, ignore them with `#[_prop]` instead:
+///
+/// ```compile_fail
+/// use duck_trait::props;
+///
+/// #[props]
+/// struct S {
+///     #[prop] // error: fields generate accessors by default; use `#[_prop]` to ignore
+///     value: u8,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// - `#[_prop]` takes no arguments:
 ///
 /// ```compile_fail
 /// use duck_trait::{fields, props};
@@ -1110,8 +1126,9 @@ pub fn fields(item: TokenStream) -> TokenStream {
 ///
 /// #[props]
 /// struct S {
-///     #[prop(pub)] // error: `#[prop]` does not take arguments
 ///     value: u8,
+///     #[_prop(pub)] // error: `#[_prop]` does not take arguments
+///     ignored: u8,
 /// }
 ///
 /// fn main() {}
@@ -1121,38 +1138,62 @@ pub fn props(attr: TokenStream, item: TokenStream) -> TokenStream {
   expand_props(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Marker stub for the field-based api.
+/// Marker stub for ignored fields.
 ///
-/// Inside a struct annotated with [`#[props]`](props) the field marker
-/// `#[prop]` is consumed (stripped) before the compiler ever resolves it, so
-/// this macro only runs when `#[prop]` is used outside such a struct, or on
-/// something other than a struct field.
+/// Inside a struct annotated with [`#[props]`](props) the `#[_prop]` marker is
+/// consumed (stripped) before the compiler ever resolves it, so this macro
+/// only runs when `#[_prop]` is used outside such a struct, or on something
+/// other than a struct field.
 ///
 /// ```compile_fail
-/// use duck_trait::prop;
+/// use duck_trait::_prop;
 ///
-/// #[prop] // error: must be applied to a named struct field inside `#[props]`
+/// #[_prop] // error: must be applied to a named struct field inside `#[props]`
 /// fn main() {}
 /// ```
 ///
-/// A `#[prop]` field without the `#[props]` wrapper never expands either:
+/// A `#[_prop]` field without the `#[props]` wrapper never expands either:
 ///
 /// ```compile_fail
-/// use duck_trait::prop;
+/// use duck_trait::_prop;
 ///
 /// struct S {
-///     #[prop] // error: `prop` is not a valid field attribute here
+///     #[_prop] // error: `_prop` is not a valid field attribute here
 ///     v: u8,
 /// }
 ///
 /// fn main() {}
 /// ```
 #[proc_macro_attribute]
+pub fn _prop(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  syn::Error::new_spanned(
+    TokenStream2::from(item),
+    "`#[_prop]` must be applied to a named struct field inside a struct \
+         annotated with `#[props]`",
+  )
+  .into_compile_error()
+  .into()
+}
+
+/// Removed marker stub.
+///
+/// `#[prop]` belonged to the old opt-in api: under the current
+/// [`#[props]`](props) every field generates accessors by default and is
+/// ignored with `#[_prop]` instead. This stub only exists to explain that on
+/// sight.
+///
+/// ```compile_fail
+/// use duck_trait::prop;
+///
+/// #[prop] // error: `#[prop]` no longer exists
+/// fn main() {}
+/// ```
+#[proc_macro_attribute]
 pub fn prop(_attr: TokenStream, item: TokenStream) -> TokenStream {
   syn::Error::new_spanned(
     TokenStream2::from(item),
-    "`#[prop]` must be applied to a named struct field inside a struct \
-         annotated with `#[props]`",
+    "`#[prop]` no longer exists: fields generate accessors by default under `#[props]`; \
+         ignore a field with `#[_prop]` instead",
   )
   .into_compile_error()
   .into()
@@ -1332,7 +1373,8 @@ fn props_on_struct(mut item_struct: ItemStruct, config: &PropsAttr) -> syn::Resu
     return Err(syn::Error::new(
       Span::call_site(),
       "`#[props]` on a struct does not take `name: Type` pairs; \
-            apply it with no arguments (optionally `path = ..`) and mark fields with `#[prop]`",
+            apply it with no arguments (optionally `path = ..`); fields generate \
+            accessors by default, ignore them with `#[_prop]`",
     ));
   }
 
@@ -1340,40 +1382,42 @@ fn props_on_struct(mut item_struct: ItemStruct, config: &PropsAttr) -> syn::Resu
 
   match &mut item_struct.fields {
     Fields::Named(fields_named) => {
-      let mut marked: Vec<(Ident, Type)> = Vec::new();
+      // inverse logic: every named field generates accessors unless ignored
+      // with a bare `#[_prop]`
+      let mut generated: Vec<(Ident, Type)> = Vec::new();
       for field in fields_named.named.iter_mut() {
-        let positions: Vec<usize> = field
-          .attrs
-          .iter()
-          .enumerate()
-          .filter(|(_, attr)| attr.path().is_ident("prop"))
-          .map(|(idx, _)| idx)
-          .collect();
-        match positions[..] {
-          [] => {}
-          [pos] => {
-            let attr = field.attrs.remove(pos);
-            if !matches!(attr.meta, Meta::Path(_)) {
-              return Err(syn::Error::new_spanned(
-                attr,
-                "`#[prop]` does not take arguments; mark the field with a bare `#[prop]`",
-              ));
-            }
-            marked.push((field.ident.clone().expect("named field has an ident"), field.ty.clone()));
-          }
-          _ => {
-            return Err(syn::Error::new(
-              field.ident.as_ref().expect("named field has an ident").span(),
-              "a field cannot be marked with `#[prop]` more than once",
+        let skip_pos = field.attrs.iter().position(|attr| attr.path().is_ident("_prop"));
+        let legacy_pos = field.attrs.iter().position(|attr| attr.path().is_ident("prop"));
+        if let Some(pos) = skip_pos {
+          let attr = field.attrs.remove(pos);
+          if !matches!(attr.meta, Meta::Path(_)) {
+            return Err(syn::Error::new_spanned(
+              attr,
+              "`#[_prop]` does not take arguments; ignore the field with a bare `#[_prop]`",
             ));
           }
+          if legacy_pos.is_some() {
+            return Err(syn::Error::new(
+              field.ident.as_ref().expect("named field has an ident").span(),
+              "a field cannot be marked with both `#[prop]` and `#[_prop]`",
+            ));
+          }
+          continue; // ignored field — no accessors
         }
+        if legacy_pos.is_some() {
+          return Err(syn::Error::new(
+            field.ident.as_ref().expect("named field has an ident").span(),
+            "fields generate accessors by default; remove `#[prop]`, \
+                 or use `#[_prop]` to ignore this field",
+          ));
+        }
+        generated.push((field.ident.clone().expect("named field has an ident"), field.ty.clone()));
       }
 
       let struct_ident = &item_struct.ident;
       let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
       let mut tokens = quote!(#item_struct);
-      for (field_ident, field_ty) in &marked {
+      for (field_ident, field_ty) in &generated {
         let trait_name = trait_name_for(field_ident)?;
         let base = method_base(field_ident);
         let trait_path = trait_path(&module, &trait_name);
@@ -1399,11 +1443,18 @@ fn props_on_struct(mut item_struct: ItemStruct, config: &PropsAttr) -> syn::Resu
     }
     Fields::Unnamed(_) | Fields::Unit => {
       for field in item_struct.fields.iter() {
-        if let Some(attr) = field.attrs.iter().find(|attr| attr.path().is_ident("prop")) {
-          return Err(syn::Error::new_spanned(attr, "`#[prop]` only supports named struct fields"));
+        if let Some(attr) = field
+          .attrs
+          .iter()
+          .find(|attr| attr.path().is_ident("_prop") || attr.path().is_ident("prop"))
+        {
+          return Err(syn::Error::new_spanned(
+            attr,
+            "`#[_prop]`/`#[prop]` only supports named struct fields",
+          ));
         }
       }
-      // nothing to mark on an unnamed or unit struct — pass the item through
+      // no named fields to generate accessors for — pass the item through
       Ok(quote!(#item_struct))
     }
   }

@@ -138,7 +138,7 @@ export async function run(): Promise<void> {
   const declFile = path.join(crate2, 'src/decl_file.rs');
   fs.writeFileSync(
     declFile,
-    '#[props]\nstruct DeclSource {\n  #[prop]\n  count: u8,\n  #[prop]\n  alpha: String,\n}\n',
+    '#[props]\nstruct DeclSource {\n  count: u8,\n  alpha: String,\n}\n',
   );
   await vscode.window.showTextDocument(vscode.Uri.file(declFile));
   await vscode.commands.executeCommand('duck-trait.declareFile');
@@ -155,11 +155,11 @@ export async function run(): Promise<void> {
   );
   fs.writeFileSync(
     path.join(crate3, 'source/lib.rs'),
-    '#[props]\nstruct A {\n  #[prop]\n  beta: u8,\n}\n',
+    '#[props]\nstruct A {\n  beta: u8,\n}\n',
   );
   fs.writeFileSync(
     path.join(crate3, 'source/deep.rs'),
-    '#[props]\nstruct B {\n  #[prop]\n  gamma: u8,\n}\n',
+    '#[props]\nstruct B {\n  gamma: u8,\n}\n',
   );
   await vscode.window.showTextDocument(vscode.Uri.file(path.join(crate3, 'source/lib.rs')));
   await vscode.commands.executeCommand('duck-trait.declareCrate');
@@ -202,7 +202,7 @@ export async function run(): Promise<void> {
   const crate5Lib = path.join(crate5, 'src/lib.rs');
   fs.writeFileSync(
     crate5Lib,
-    'use duck_trait::{fields, props};\n\nmod override_fields {\n  use duck_trait::fields;\n\n  fields! {\n    pub tag,\n  }\n}\n\n#[props(path = crate::override_fields)]\nstruct T {\n  #[prop]\n  tag: String,\n  #[prop]\n  extra: u8,\n}\n',
+    'use duck_trait::{fields, props};\n\nmod override_fields {\n  use duck_trait::fields;\n\n  fields! {\n    pub tag,\n  }\n}\n\n#[props(path = crate::override_fields)]\nstruct T {\n  tag: String,\n  extra: u8,\n}\n',
   );
   await vscode.window.showTextDocument(vscode.Uri.file(crate5Lib));
   await vscode.commands.executeCommand('duck-trait.declareCrate');

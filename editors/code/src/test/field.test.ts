@@ -29,28 +29,35 @@ test('fieldForTrait accepts guesses that regenerate the trait', () => {
   assert.equal(fieldForTrait('_HTTP'), 'h_t_t_p');
 });
 
-test('scanPropFields reads marked fields', () => {
+test('scanPropFields collects every named field, ignoring #[_prop] ones', () => {
   const text = `
     #[props]
     struct S {
-      #[prop]
       value: i32,
-      #[doc = "x"]
+      /// doc comment
       #[prop]
+      legacy: u8,
+      #[_prop]
+      ignored: bool,
+      #[doc = "x"]
+      #[_prop]
+      hidden: (),
       r#type: u8,
       #[prop] inline: bool,
-      plain: (),
     }
   `;
   assert.deepEqual(scanPropFields(text), [
     { field: 'value', trait: '_Value' },
+    { field: 'legacy', trait: '_Legacy' },
     { field: 'r#type', trait: '_Type' },
     { field: 'inline', trait: '_Inline' },
   ]);
 });
 
 test('resolveFieldName prefers the scanned spelling over the guess', () => {
-  assert.equal(resolveFieldName('_Value', 'struct S { #[prop] value: i32 }'), 'value');
+  assert.equal(resolveFieldName('_Value', 'struct S { value: i32 }'), 'value');
   assert.equal(resolveFieldName('_Value', 'struct S { other: i32 }'), 'value');
-  assert.equal(resolveFieldName('_Type', 'struct S { #[prop] r#type: u8 }'), 'r#type');
+  assert.equal(resolveFieldName('_Type', 'struct S { r#type: u8 }'), 'r#type');
+  // ignored fields are not candidates
+  assert.equal(resolveFieldName('_Hidden', 'struct S {\n  #[_prop]\n  hidden: u8,\n}'), 'hidden');
 });

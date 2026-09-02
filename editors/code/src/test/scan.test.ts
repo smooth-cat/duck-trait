@@ -2,23 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { declaredFields, scanPropsStructs, workspaceMembers } from '../scan';
 
-test('scanPropsStructs collects marked fields from structs', () => {
+test('scanPropsStructs collects every named field of structs', () => {
   const text = `
     #[props]
     struct A {
-      #[prop]
       value: i32,
       plain: u8,
     }
 
     #[props]
     pub struct B<T: Clone> where T: Send {
-      #[prop]
       my_field: T,
     }
   `;
   assert.deepEqual(scanPropsStructs(text), [
-    { modulePath: undefined, fields: ['value'] },
+    { modulePath: undefined, fields: ['value', 'plain'] },
     { modulePath: undefined, fields: ['my_field'] },
   ]);
 });
@@ -27,42 +25,46 @@ test('scanPropsStructs reads the path override', () => {
   const text = `
     #[props(path = crate::override_fields)]
     struct T {
-      #[prop]
       tag: String,
     }
   `;
   assert.deepEqual(scanPropsStructs(text), [{ modulePath: 'crate::override_fields', fields: ['tag'] }]);
 });
 
-test('scanPropsStructs ignores traits and bare #[prop] structs', () => {
+test('scanPropsStructs excludes #[_prop]-ignored fields and traits', () => {
   const text = `
     #[props(value: i32)]
     trait Show {}
 
-    struct Plain {
-      #[prop]
-      orphan: u8,
+    #[props]
+    struct S {
+      value: u8,
+      #[_prop]
+      ignored: u8,
     }
   `;
-  assert.deepEqual(scanPropsStructs(text), []);
+  assert.deepEqual(scanPropsStructs(text), [{ modulePath: undefined, fields: ['value'] }]);
 });
 
-test('scanPropsStructs handles raw identifiers and other attributes', () => {
+test('scanPropsStructs handles raw identifiers and keeps ignore across attributes', () => {
   const text = `
     #[props]
     #[serde(rename_all = "snake_case")]
     struct K {
       /// doc comment
       #[prop]
+      legacy: u8,
       r#type: u8,
-      #[prop]
       #[doc = "x"]
+      #[_prop]
+      hidden: String,
       name: String,
     }
   `;
   const structs = scanPropsStructs(text);
   assert.equal(structs.length, 1);
-  assert.deepEqual(structs[0].fields, ['r#type', 'name']);
+  // `#[prop]` is a stale marker: the field still counts (it compiles as an error anyway)
+  assert.deepEqual(structs[0].fields, ['legacy', 'r#type', 'name']);
 });
 
 test('declaredFields reads every fields! block', () => {

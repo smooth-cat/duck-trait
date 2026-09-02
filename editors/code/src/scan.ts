@@ -20,7 +20,6 @@ export interface PropsStruct {
 const PROPS_STRUCT_RE =
   /#\[props(?:\([^)]*\))?\]\s*(?:#[^\n]*\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+/;
 const PATH_ARG_RE = /(?:^|[{,\s])path\s*=\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)/;
-const PROP_FIELD_RE = /#\[prop\]\s*(?:#[^\n]*\s*)*(r#)?([A-Za-z_][A-Za-z0-9_]*)\s*:/g;
 
 /** Matches the balanced-bracket span starting at `text[opener]` ('(' or '{'). */
 function matchBracket(text: string, opener: number): number {
@@ -70,8 +69,9 @@ function matchBracket(text: string, opener: number): number {
 
 /**
  * Scans Rust source for structs annotated with `#[props]` / `#[props(path = ..)]`
- * and collects their `#[prop]` fields. `#[props(name: Type)]` on **traits** is
- * ignored — traits do not declare fields.
+ * and collects their fields. Every named field counts (they generate accessors
+ * by default) except the ones ignored with `#[_prop]`. `#[props(name: Type)]`
+ * on **traits** is ignored — traits do not declare fields.
  */
 export function scanPropsStructs(text: string): PropsStruct[] {
   const out: PropsStruct[] = [];
@@ -89,15 +89,50 @@ export function scanPropsStructs(text: string): PropsStruct[] {
       continue;
     }
     const body = text.slice(brace + 1, closer);
-    const fields: string[] = [];
-    for (const f of body.matchAll(PROP_FIELD_RE)) {
-      fields.push((f[1] ?? '') + f[2]);
-    }
     const modulePath = attrArgs?.[1] ? PATH_ARG_RE.exec(attrArgs[1])?.[1] : undefined;
-    out.push({ modulePath, fields });
+    out.push({ modulePath, fields: scanFields(body) });
     re.lastIndex = closer; // continue scanning after the struct body
   }
   return out;
+}
+
+/**
+ * Named fields of a struct body: every `name:` entry — the inverse logic of
+ * the old opt-in api, `#[_prop]`-ignored fields are excluded. Attribute lines
+ * and comments keep the pending ignore state, so a `#[_prop]` followed by doc
+ * comments still excludes its field.
+ */
+function scanFields(body: string): string[] {
+  const fields: string[] = [];
+  let ignore = false;
+  const collect = (line: string): void => {
+    const m = line.match(/^(?:pub(?:\([^)]*\))?\s+)?(r#)?([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+    if (m) {
+      if (!ignore) {
+        fields.push((m[1] ?? '') + m[2]);
+      }
+      ignore = false;
+    }
+  };
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#[')) {
+      if (/#\[_prop\]/.test(line)) {
+        ignore = true;
+      }
+      // the field may share the line with its attributes: `#[prop] inline: bool`
+      const rest = line.replace(/#\[[^\]]*\]/g, '').trim();
+      if (rest) {
+        collect(rest);
+      }
+      continue;
+    }
+    if (line.startsWith('//') || line === '') {
+      continue;
+    }
+    collect(line);
+  }
+  return fields;
 }
 
 /**

@@ -639,7 +639,8 @@ mod vis_kw {
 
 // ---------------------------------------------------------------------------
 // field-based api (`fields!` + `#[props]`) — one crate-wide trait set declared
-// in `crate::_fields`, implemented from any module via `#[prop]` markers
+// in `crate::_fields`; every field generates accessors by default, `#[_prop]`
+// opts a field out
 // ---------------------------------------------------------------------------
 
 // convention: declarations live in the file module `src/_fields.rs` —
@@ -664,7 +665,6 @@ mod props_remote {
 
   #[props]
   pub struct Remote {
-    #[prop]
     value: u64,
   }
 
@@ -692,24 +692,20 @@ mod props_api {
 
   #[props]
   struct PropsBasic {
-    #[prop]
     value: i32,
-    #[prop]
     name: String,
-    #[prop]
     r#type: u8,
+    #[_prop] // no accessors generated for this field
     unmarked: bool,
   }
 
   #[props]
   struct LocalValue {
-    #[prop]
     value: u64,
   }
 
   #[props]
   struct PropsWrapper<T: Clone> {
-    #[prop]
     inner: T,
   }
 
@@ -767,7 +763,6 @@ mod props_override {
 
   #[props(path = crate::override_fields)]
   struct Tagged {
-    #[prop]
     tag: String,
   }
 

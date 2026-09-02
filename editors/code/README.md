@@ -34,7 +34,7 @@ All fixes are offered from anywhere in the file: the cursor does not have to sit
 
 | Command | Behavior |
 | --- | --- |
-| `duck-trait: Declare missing fields of this file in _fields.rs` | Scans the active file for `#[props]` structs and declares every `#[prop]` field that is missing from its declaration module (honors `#[props(path = ..)]` overrides). |
+| `duck-trait: Declare missing fields of this file in _fields.rs` | Scans the active file for `#[props]` structs and declares every field that is missing from its declaration module (`#[_prop]`-ignored fields excluded, honors `#[props(path = ..)]` overrides). |
 | `duck-trait: Declare all missing fields of the crate in _fields.rs` | Same, recursively for every `.rs` file under the crate's source directory. |
 | `duck-trait: Create _fields.rs` | Scaffolds the declaration file (header comment + `use duck_trait::fields;`, no empty `fields!` block — that would not compile) and writes `mod _fields;` into the entry file. Opens the file when it already exists. |
 
@@ -56,7 +56,7 @@ workspace edit and every touched file is saved immediately, so rust-analyzer re-
 manual `Cmd+S`. Insertion points are computed against the live state of the target file — the
 editor buffer when the file is open (unsaved changes survive), otherwise disk.
 
-The field name is resolved from the real `#[prop]` spelling in the erroneous file when possible
+The field name is resolved from the real field spelling in the erroneous file when possible
 (this handles raw identifiers such as `r#type`); otherwise the trait name is guessed back into
 snake_case (`_MyField` -> `my_field`).
 

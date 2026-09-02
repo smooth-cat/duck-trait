@@ -51,17 +51,45 @@ export interface PropField {
 }
 
 /**
- * Scans Rust source for `#[prop]`-marked named fields and returns their names
- * together with the accessor trait each one maps to.
+ * Scans Rust source for named struct fields and returns their names together
+ * with the accessor trait each one maps to. Inverse logic: every field counts,
+ * `#[_prop]`-ignored fields are excluded.
  */
 export function scanPropFields(text: string): PropField[] {
-  const re = /#\[prop\]\s*(?:#\[[^\]]*\]\s*)*(r#)?([A-Za-z_][A-Za-z0-9_]*)\s*:/g;
   const out: PropField[] = [];
-  for (const m of text.matchAll(re)) {
-    const field = (m[1] ?? '') + m[2];
-    const trait = traitNameFor(field);
-    if (trait) {
-      out.push({ field, trait });
+  let ignore = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#[')) {
+      if (/#\[_prop\]/.test(line)) {
+        ignore = true;
+      }
+      // the field may share the line with its attributes: `#[prop] inline: bool`
+      const rest = line.replace(/#\[[^\]]*\]/g, '').trim();
+      if (rest) {
+        const m = rest.match(/^(?:pub(?:\([^)]*\))?\s+)?(r#)?([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+        if (m) {
+          const field = (m[1] ?? '') + m[2];
+          const trait = traitNameFor(field);
+          if (trait && !ignore) {
+            out.push({ field, trait });
+          }
+          ignore = false;
+        }
+      }
+      continue;
+    }
+    if (line.startsWith('//') || line === '') {
+      continue;
+    }
+    const m = line.match(/^(?:pub(?:\([^)]*\))?\s+)?(r#)?([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+    if (m) {
+      const field = (m[1] ?? '') + m[2];
+      const trait = traitNameFor(field);
+      if (trait && !ignore) {
+        out.push({ field, trait });
+      }
+      ignore = false;
     }
   }
   return out;
@@ -69,8 +97,8 @@ export function scanPropFields(text: string): PropField[] {
 
 /**
  * Determines the field name to declare for `traitName`: the real spelling of a
- * `#[prop]` field found in `docText` wins; otherwise the trait name is guessed
- * back into a snake_case field name.
+ * field found in `docText` wins; otherwise the trait name is guessed back into
+ * a snake_case field name.
  */
 export function resolveFieldName(traitName: string, docText: string): string | undefined {
   const hit = scanPropFields(docText).find(f => f.trait === traitName);

@@ -69,24 +69,23 @@ trait Opr {
   }
 }
 
-// 3. #[prop] makes the struct implement _Value<i32>
-// no import needed — the macro adds it for you
+// 3. every field implements the declared traits by default;
+// no marker needed — #[_prop] opts a field out
 #[props]
-struct A {
-  #[prop]
-  value: i32
+struct A { 
+  value: i32,
+  // mark this field not impl accessor
+  #[_prop] 
+  ignored_prop: bool,
 }
 #[props]
-struct B {
-  #[prop]
-  value: i32
-}
+struct B { value: i32 }
 
 impl Opr for A {}
 impl Opr for B {}
 ```
 
-**Limitations**: a `#[prop]` field removed entirely by `#[cfg]` breaks the generated impl; avoid
+**Limitations**: a field removed entirely by `#[cfg]` breaks the generated impl; avoid
 mixing the marker api ([readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md)) and the field-based api for the same
 field name in one crate (method resolution would be ambiguous).
 
@@ -119,11 +118,10 @@ trait Foo {
   }
 }
 ```
-3. #[prop] makes the struct implement the trait
+3. every field implements the trait by default, no marker needed
 ```rust
 #[props]
 struct Player {
-  #[prop]
   value: i32,
 }
 impl Foo for Player {}
@@ -159,13 +157,13 @@ too.
 - `fields!` derives trait and method names from the field name (see "Naming conventions");
   visibility defaults to `pub(crate)`, and any qualifier written before the name (`pub`,
   `pub(crate)`, `pub(super)`, …) is applied to its trait.
-- `#[props]` on a struct strips the `#[prop]` markers and generates
-  `impl crate::_fields::_Value<i32> for Player`; override the module with
+- `#[props]` on a struct generates `impl crate::_fields::_Value<i32> for Player` for **every**
+  field; mark the exceptions with `#[_prop]`. Override the module with
   `#[props(path = crate::my_fields)]`.
 - `#[props]` on a trait appends one supertrait bound per `name: Type` pair, so default methods
   can use the accessors without any imports.
-- A `#[prop]` field whose name was never declared fails to resolve its trait at the impl site —
-  the declaration list is the single source of truth.
+- A field that is not ignored with `#[_prop]` must have its name declared in `fields!`, otherwise
+  its trait fails to resolve at the impl site — the declaration list is the single source of truth.
 
 ### Project structure
 
@@ -271,24 +269,22 @@ trait Opr {
   }
 }
 
-// 3. #[prop] 标记会实现 _Value<i32> trait
-// 不需要引入，宏会自动帮忙引入
+// 3. 所有字段默认实现声明的 trait，无需标记；#[_prop] 可忽略字段
 #[props]
 struct A { 
-  #[prop]  
-  value: i32 
+  value: i32,
+  // 标记这个字段不实现 访问器
+  #[_prop] 
+  ignored_prop: bool,
 }
 #[props]
-struct B { 
-  #[prop]  
-  value: i32 
-}
+struct B { value: i32 }
 
 impl Opr for A {}
 impl Opr for B {}
 ```
 
-**限制**：被 `#[cfg]` 整体移除的 `#[prop]` 字段会导致生成的 impl 编译失败；避免在同一 crate
+**限制**：被 `#[cfg]` 整体移除的字段会导致生成的 impl 编译失败；避免在同一 crate
 中对同名字段混用标记 api（[readme-duck.md](https://github.com/smooth-cat/duck-trait/blob/main/readme-duck.md)）与字段声明 api（方法解析会歧义）。
 
 ### LLM
@@ -320,11 +316,10 @@ trait Foo {
   }
 }
 ```
-3. #[prop] 标记会实现 trait
+3. 所有字段默认实现 trait，无需任何标记（#[_prop] 可忽略字段）
 ```rust
 #[props]
 struct Player {
-  #[prop]
   value: i32,
 }
 impl Foo for Player {}
@@ -357,12 +352,12 @@ impl Foo for Player {}
 
 - `fields!` 按字段名推导 trait 与方法名（见「命名约定」）；可见性默认 `pub(crate)`，在名字前
   写任意限定符（`pub`、`pub(crate)`、`pub(super)`、…）会应用到对应的 trait。
-- `#[props]` 用于 struct 时剥离 `#[prop]` 标记并生成
-  `impl crate::_fields::_Value<i32> for Player`；用 `#[props(path = crate::my_fields)]`
+- `#[props]` 用于 struct 时为**每个**字段生成 `impl crate::_fields::_Value<i32> for Player`；
+  不需要生成访问器的字段用 `#[_prop]` 忽略。用 `#[props(path = crate::my_fields)]`
   可覆盖声明所在的模块。
 - `#[props]` 用于 trait 时为每个 `name: Type` 对追加一个 supertrait bound，默认方法无需任何
   import 即可使用访问器。
-- 未在 `fields!` 中声明的 `#[prop]` 字段会在 impl 处报 unresolved trait——声明列表是唯一的事实来源。
+- 未被 `#[_prop]` 忽略的字段必须在 `fields!` 中声明，否则 impl 处报 unresolved trait——声明列表是唯一的事实来源。
 
 ### 项目结构
 
