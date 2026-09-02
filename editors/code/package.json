@@ -1,0 +1,55 @@
+{
+  "name": "duck-trait",
+  "displayName": "duck-trait",
+  "description": "Quick fixes for duck-trait's field-based api: declare missing accessor traits in _fields.rs from the `Cmd+.` menu.",
+  "version": "0.11.3",
+  "publisher": "smooth-cat",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/smooth-cat/duck-trait"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:rust"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "duck-trait.declareFile",
+        "title": "duck-trait: Declare missing fields of this file in _fields.rs",
+        "category": "duck-trait"
+      },
+      {
+        "command": "duck-trait.declareCrate",
+        "title": "duck-trait: Declare all missing fields of the crate in _fields.rs",
+        "category": "duck-trait"
+      },
+      {
+        "command": "duck-trait.createFieldsFile",
+        "title": "duck-trait: Create _fields.rs",
+        "category": "duck-trait"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "test:integration": "npm run compile && node out/test/suite/launch.js",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.5.0"
+  }
+}
