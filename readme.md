@@ -83,6 +83,12 @@ struct B { value: i32 }
 
 impl Opr for A {}
 impl Opr for B {}
+
+// use fields as generic bound
+use crate::_fields::_Value;
+fn double<T: _Value<i32>>(v: T) -> i32 {
+	*v.value() * 2
+}
 ```
 
 **Limitations**: a field removed entirely by `#[cfg]` breaks the generated impl; avoid
@@ -121,10 +127,15 @@ trait Foo {
 3. every field implements the trait by default, no marker needed
 ```rust
 #[props]
-struct Player {
-  value: i32,
-}
+struct Player { value: i32 }
 impl Foo for Player {}
+```
+4. use fields as generic bound
+```rust
+use crate::_fields::_Value;
+fn double<T: _Value<i32>>(v: T) -> i32 {
+  *v.value() * 2
+}
 ```
 ````
 
@@ -282,6 +293,12 @@ struct B { value: i32 }
 
 impl Opr for A {}
 impl Opr for B {}
+
+// 将 fields 用于泛型约束
+use crate::_fields::_Value;
+fn double<T: _Value<i32>>(v: T) -> i32 {
+	*v.value() * 2
+}
 ```
 
 **限制**：被 `#[cfg]` 整体移除的字段会导致生成的 impl 编译失败；避免在同一 crate
@@ -319,10 +336,15 @@ trait Foo {
 3. 所有字段默认实现 trait，无需任何标记（#[_prop] 可忽略字段）
 ```rust
 #[props]
-struct Player {
-  value: i32,
-}
+struct Player { value: i32 }
 impl Foo for Player {}
+```
+4. 将 fields 用于泛型约束
+```rust
+use crate::_fields::_Value;
+fn double<T: _Value<i32>>(v: T) -> i32 {
+  *v.value() * 2
+}
 ```
 ````
 
