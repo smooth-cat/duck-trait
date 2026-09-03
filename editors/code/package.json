@@ -1,8 +1,8 @@
 {
   "name": "duck-trait",
   "displayName": "duck-trait",
-  "description": "Quick fixes for duck-trait's field-based api: declare missing accessor traits in _fields.rs from the `Cmd+.` menu.",
-  "version": "0.11.4",
+  "description": "Quick fixes for duck-trait's field-based api: declare missing accessor traits in _fields.rs from the `Cmd+.` menu, or automatically when a Rust file is saved.",
+  "version": "0.11.6",
   "publisher": "smooth-cat",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -20,6 +20,16 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "duck-trait",
+      "properties": {
+        "duck-trait.autoDeclareOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "After saving a Rust file, automatically declare its missing `#[props]` fields in the crate's `_fields.rs` — creating the declaration file and the `mod _fields;` wiring when needed. Only runs when the crate (in a monorepo: the nearest member manifest) actually depends on `duck-trait`."
+        }
+      }
+    },
     "commands": [
       {
         "command": "duck-trait.declareFile",

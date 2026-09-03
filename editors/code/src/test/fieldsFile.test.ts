@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   appendedFieldsBlock,
+  fieldsImportInsertion,
   findFirstFieldsBlock,
   hasFieldsImport,
   inferIndent,
@@ -10,6 +11,7 @@ import {
   modInsertion,
   newFieldsFileContent,
 } from '../fieldsFile';
+import { declaredFields } from '../scan';
 
 test('finds a multi-line brace block and its entry indentation', () => {
   const text = 'use duck_trait::fields;\n\nfields! {\n    value,\n}\n';
@@ -110,6 +112,53 @@ test('appendedFieldsBlock normalizes a missing trailing newline', () => {
 test('appendedFieldsBlock honors a custom indent and several fields', () => {
   const at = appendedFieldsBlock('', ['value', 'name'], '  ');
   assert.equal(at.snippet, 'use duck_trait::fields;\n\nfields! {\n  value,\n  name,\n}\n');
+});
+
+test('fieldsImportInsertion places the import in front of a bare fields! block', () => {
+  const text = 'fields! {\n    value,\n}\n';
+  const at = fieldsImportInsertion(text)!;
+  assert.equal(at.offset, 0);
+  assert.equal(at.snippet, 'use duck_trait::fields;\n\n');
+});
+
+test('fieldsImportInsertion groups with the leading docs and existing imports', () => {
+  const text = '//! module docs\nuse duck_trait::props;\n\nfields! {\n    value,\n}\n';
+  const at = fieldsImportInsertion(text)!;
+  assert.equal(text.slice(0, at.offset) + at.snippet + text.slice(at.offset),
+    '//! module docs\nuse duck_trait::props;\nuse duck_trait::fields;\n\nfields! {\n    value,\n}\n');
+});
+
+test('fieldsImportInsertion keeps an existing import intact (no double import)', () => {
+  assert.equal(fieldsImportInsertion('use duck_trait::fields;\n\nfields! {\n    value,\n}\n'), undefined);
+  assert.equal(fieldsImportInsertion('use duck_trait::{fields, props};\nfields!(value)'), undefined);
+  assert.equal(fieldsImportInsertion('use duck_trait::*;\nfields!(value)'), undefined);
+  // renamed imports do not make `fields!` available — the insert is still offered
+  assert.ok(fieldsImportInsertion('use duck_trait::fields as f;\nfields!(value)'));
+});
+
+test('fieldsImportInsertion fixes a missing trailing newline before the block', () => {
+  const text = 'use duck_trait::props;';
+  const at = fieldsImportInsertion(text)!;
+  assert.equal(text.slice(0, at.offset) + at.snippet + text.slice(at.offset),
+    'use duck_trait::props;\nuse duck_trait::fields;\n');
+});
+
+test('fieldsImportInsertion indents imports meant for an inline module body', () => {
+  const at = fieldsImportInsertion('fields! {\n  value,\n}\n', '  ')!;
+  assert.equal(at.snippet, '  use duck_trait::fields;\n\n');
+});
+
+test('a fields! block without the import ends up with both after the fix', () => {
+  const text = 'fields! {\n    value,\n}\n';
+  const block = findFirstFieldsBlock(text)!;
+  const at = insertionFor(text, block, ['name']);
+  const afterField = text.slice(0, at.offset) + at.snippet + text.slice(at.offset);
+  const imp = fieldsImportInsertion(afterField)!;
+  const fixed = afterField.slice(0, imp.offset) + imp.snippet + afterField.slice(imp.offset);
+  assert.equal(fixed, 'use duck_trait::fields;\n\nfields! {\n    value,\n    name,\n}\n');
+  // and a repeat run adds nothing — import present, field already declared
+  assert.equal(fieldsImportInsertion(fixed), undefined);
+  assert.deepEqual(declaredFields(fixed), ['value', 'name']);
 });
 
 test('hasFieldsImport detects direct, brace-list and glob imports', () => {

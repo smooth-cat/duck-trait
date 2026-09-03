@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { declaredFields, scanPropsStructs, workspaceMembers } from '../scan';
+import { declaredFields, hasDependency, scanPropsStructs, workspaceMembers } from '../scan';
 
 test('scanPropsStructs collects every named field of structs', () => {
   const text = `
@@ -110,4 +110,56 @@ test('workspaceMembers lists literals and globs', () => {
 
 test('workspaceMembers is empty without a workspace section', () => {
   assert.deepEqual(workspaceMembers('[package]\nname = "x"\n'), []);
+});
+
+test('hasDependency detects plain, table and path dependencies', () => {
+  assert.equal(hasDependency('[dependencies]\nduck-trait = "0.13.0"\nserde = "1"\n', 'duck-trait'), true);
+  assert.equal(hasDependency('[dependencies]\nduck-trait = { path = "../duck-trait" }\n', 'duck-trait'), true);
+  assert.equal(hasDependency('[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n', 'duck-trait'), false);
+});
+
+test('hasDependency detects workspace inheritance and dotted keys', () => {
+  assert.equal(hasDependency('[dependencies]\nduck-trait.workspace = true\n', 'duck-trait'), true);
+  assert.equal(hasDependency('[dependencies]\nduck-trait = { workspace = true }\n', 'duck-trait'), true);
+});
+
+test('hasDependency detects renamed packages, single- and multi-line', () => {
+  assert.equal(
+    hasDependency('[dependencies]\ndt = { path = "..", package = "duck-trait" }\n', 'duck-trait'),
+    true,
+  );
+  assert.equal(
+    hasDependency(
+      '[dependencies]\ndt = {\n  path = "..",\n  package = "duck-trait",\n}\n',
+      'duck-trait',
+    ),
+    true,
+  );
+});
+
+test('hasDependency ignores prefix names, comments and unrelated crates', () => {
+  const text = '[dependencies]\nduck-trait-lite = "1"\n# duck-trait = "0.1"\nserde = "1"\n';
+  assert.equal(hasDependency(text, 'duck-trait'), false);
+});
+
+test('hasDependency covers dev- and build-dependencies', () => {
+  assert.equal(hasDependency('[dev-dependencies]\nduck-trait = { path = "../duck-trait" }\n', 'duck-trait'), true);
+  assert.equal(hasDependency('[build-dependencies]\nduck-trait = "1"\n', 'duck-trait'), true);
+});
+
+test('hasDependency ignores workspace.dependencies the member does not opt into', () => {
+  const text = [
+    '[workspace.dependencies]',
+    'duck-trait = { path = "crates/duck-trait" }',
+    '',
+    '[dependencies]',
+    'serde = "1"',
+  ].join('\n');
+  assert.equal(hasDependency(text, 'duck-trait'), false);
+});
+
+test('hasDependency reads the verify manifest as a duck-trait consumer', () => {
+  const verify = '[dependencies]\nduck-trait = { path = "../duck-trait" }\n';
+  assert.equal(hasDependency(verify, 'duck-trait'), true);
+  assert.equal(hasDependency('', 'duck-trait'), false);
 });

@@ -5,7 +5,9 @@ import { matchDuckTraitDiag } from './diagnose';
 import { resolveFieldName } from './field';
 import {
   appendedFieldsBlock,
+  fieldsImportInsertion,
   findFirstFieldsBlock,
+  hasFieldsImport,
   inferIndent,
   inlineModuleSpan,
   insertionFor,
@@ -13,7 +15,7 @@ import {
   newFieldsFileContent,
   InlineModule,
 } from './fieldsFile';
-import { declaredFields, scanPropsStructs, workspaceMembers } from './scan';
+import { declaredFields, hasDependency, scanPropsStructs, workspaceMembers } from './scan';
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
@@ -82,7 +84,81 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       await createFieldsFile(crate);
     }),
+    vscode.workspace.onDidSaveTextDocument(doc => {
+      void maybeAutoDeclare(doc);
+    }),
+    // no pending debounce may outlive the extension
+    new vscode.Disposable(() => {
+      for (const { timer } of autoDeclarePending.values()) {
+        clearTimeout(timer);
+      }
+      autoDeclarePending.clear();
+    }),
   );
+}
+
+/** How long a file's save waits for more saves of the same file before running. */
+const AUTO_DECLARE_DEBOUNCE_MS = 300;
+
+/** Debounce bookkeeping: saved file -> pending run (crate + its timer). */
+const autoDeclarePending = new Map<string, { crate: Crate; timer: NodeJS.Timeout }>();
+
+/**
+ * Save-triggered auto-declaration: content-diff the saved Rust file against
+ * its fields module and fill the gap, silently. Runs only when the saved
+ * file's crate — the nearest member manifest, so monorepo siblings do not
+ * leak in — actually depends on `duck-trait`.
+ */
+function maybeAutoDeclare(doc: vscode.TextDocument): void {
+  if (doc.languageId !== 'rust' || doc.uri.scheme !== 'file' || !doc.uri.fsPath.endsWith('.rs')) {
+    return;
+  }
+  if (path.basename(doc.uri.fsPath) === '_fields.rs') {
+    return; // declaration files hold no #[props] structs — a save here is always a no-op
+  }
+  if (!vscode.workspace.getConfiguration('duck-trait').get('autoDeclareOnSave', true)) {
+    return;
+  }
+  const crate = locateCrate(path.dirname(doc.uri.fsPath));
+  if (!crate || !entryFileOf(crate)) {
+    return;
+  }
+  const manifest = path.join(crate.root, 'Cargo.toml');
+  try {
+    if (!hasDependency(fs.readFileSync(manifest, 'utf8'), 'duck-trait')) {
+      return; // the crate does not use duck-trait — nothing to auto-generate
+    }
+  } catch {
+    return;
+  }
+  scheduleAutoDeclare(crate, doc.uri.fsPath);
+}
+
+/**
+ * Per-file debounce: the debounce window restarts on every save of the same
+ * file, so a burst of saves collapses into one run — a newer save supersedes
+ * the older pending one instead of queueing a second (already no-op) task.
+ * Runs that already started are never interrupted.
+ */
+function scheduleAutoDeclare(crate: Crate, file: string): void {
+  const existing = autoDeclarePending.get(file);
+  if (existing) {
+    clearTimeout(existing.timer);
+  }
+  const timer = setTimeout(() => {
+    autoDeclarePending.delete(file);
+    void enqueueAutoDeclare(crate, file);
+  }, AUTO_DECLARE_DEBOUNCE_MS);
+  autoDeclarePending.set(file, { crate, timer });
+}
+
+/** Save events run one at a time so concurrent plans never race on offsets. */
+let autoDeclareChain: Promise<void> = Promise.resolve();
+function enqueueAutoDeclare(crate: Crate, file: string): Promise<void> {
+  const run = (): Promise<void> => declareMissing(crate, [file], 'in this file', { silent: true });
+  const own = autoDeclareChain.then(run, run).catch(() => {});
+  autoDeclareChain = own;
+  return own;
 }
 
 /**
@@ -189,7 +265,17 @@ function rustFiles(dir: string): string[] {
  * structs, diff their `#[prop]` fields against the declarations, and apply one
  * plan that fills every gap (missing import, `mod` declaration, new file).
  */
-async function declareMissing(crate: Crate, files: string[], scopeLabel: string): Promise<void> {
+async function declareMissing(
+  crate: Crate,
+  files: string[],
+  scopeLabel: string,
+  opts: { silent?: boolean } = {},
+): Promise<void> {
+  const show = (message: string): void => {
+    if (!opts.silent) {
+      void vscode.window.showInformationMessage(message);
+    }
+  };
   // module path -> every `#[prop]` field of the structs targeting it
   const byModule = new Map<string, string[]>();
   for (const file of files) {
@@ -212,9 +298,7 @@ async function declareMissing(crate: Crate, files: string[], scopeLabel: string)
     }
   }
   if (byModule.size === 0) {
-    void vscode.window.showInformationMessage(
-      `duck-trait: no #[props] structs with #[prop] fields found ${scopeLabel}`,
-    );
+    show(`duck-trait: no #[props] structs with #[prop] fields found ${scopeLabel}`);
     return;
   }
 
@@ -241,32 +325,30 @@ async function declareMissing(crate: Crate, files: string[], scopeLabel: string)
       if (targetText === undefined) {
         return;
       }
-      const known = new Set(declaredFields(targetText));
-      const missing = fields.filter(f => !known.has(f));
-      if (missing.length > 0) {
-        const indent = crateIndent(crate, targetText);
-        const block = findFirstFieldsBlock(targetText, indent);
-        const ins = block
-          ? insertionFor(targetText, block, missing)
-          : appendedFieldsBlock(targetText, missing, indent);
-        plan.edits.push({
-          path: target,
-          ...positionAt(targetText, ins.offset),
-          snippet: ins.snippet,
-        });
-        declared += missing.length;
-      }
+      declared += appendFileDeclarations(plan, crate, target, targetText, fields);
     } else {
-      // one new declaration file per run — run the command again for others
-      if (plan.create) {
-        continue;
+      // the module may be declared inline in the entry file — extend it
+      // instead of creating an orphan declaration file it cannot be wired to
+      const inline = inlineModuleSpan(rootText, segments[segments.length - 1]);
+      if (inline) {
+        declared += appendInlineDeclarations(
+          plan,
+          crate,
+          { rootFile, rootText, span: inline },
+          fields,
+        );
+      } else {
+        // one new declaration file per run — run the command again for others
+        if (plan.create) {
+          continue;
+        }
+        createdModules++;
+        plan.create = {
+          path: target,
+          content: newFieldsFileContent(fields, crateIndent(crate, rootText)),
+        };
+        declared += fields.length;
       }
-      createdModules++;
-      plan.create = {
-        path: target,
-        content: newFieldsFileContent(fields, crateIndent(crate, rootText)),
-      };
-      declared += fields.length;
     }
 
     // the declaration may exist without its `mod` wiring
@@ -277,9 +359,7 @@ async function declareMissing(crate: Crate, files: string[], scopeLabel: string)
   }
 
   if (!plan.create && plan.edits.length === 0) {
-    void vscode.window.showInformationMessage(
-      'duck-trait: nothing to declare — every field is already declared',
-    );
+    show('duck-trait: nothing to declare — every field is already declared');
     return;
   }
   await vscode.commands.executeCommand('duck-trait.applyFix', plan);
@@ -290,7 +370,7 @@ async function declareMissing(crate: Crate, files: string[], scopeLabel: string)
   if (plan.create) {
     parts.push(`created ${path.relative(crate.root, plan.create.path)}`);
   }
-  void vscode.window.showInformationMessage(`duck-trait: ${parts.join(', ')} ${scopeLabel}`);
+  show(`duck-trait: ${parts.join(', ')} ${scopeLabel}`);
 }
 
 async function createFieldsFile(crate: Crate): Promise<void> {
@@ -476,7 +556,7 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
       return undefined;
     }
     const plan: FixPlan = { edits: [] };
-    if (appendDeclarations(crate, site, segments, [field], plan) === 0) {
+    if (appendDeclarations(crate, site, segments, [field], plan) === 0 && plan.edits.length === 0) {
       return undefined; // already declared — a stale diagnostic
     }
     const targetRel =
@@ -621,34 +701,9 @@ function appendDeclarations(
 ): number {
   let declared = 0;
   if (site.kind === 'file') {
-    const known = new Set(declaredFields(site.text));
-    const missing = fields.filter(f => !known.has(f));
-    if (missing.length > 0) {
-      const indent = crateIndent(crate, site.text);
-      const block = findFirstFieldsBlock(site.text, indent);
-      const ins = block
-        ? insertionFor(site.text, block, missing)
-        : appendedFieldsBlock(site.text, missing, indent);
-      plan.edits.push({ path: site.target, ...positionAt(site.text, ins.offset), snippet: ins.snippet });
-      declared = missing.length;
-    }
+    declared = appendFileDeclarations(plan, crate, site.target, site.text, fields);
   } else if (site.kind === 'inline') {
-    const bodyText = site.rootText.slice(site.span.opener + 1, site.span.closer);
-    const known = new Set(declaredFields(bodyText));
-    const missing = fields.filter(f => !known.has(f));
-    if (missing.length > 0) {
-      const step = crateIndent(crate, site.rootText) ?? '    ';
-      const block = findFirstFieldsBlock(bodyText, step);
-      const ins = block
-        ? insertionFor(bodyText, block, missing)
-        : appendedFieldsBlock(bodyText, missing, step + step);
-      plan.edits.push({
-        path: site.rootFile,
-        ...positionAt(site.rootText, site.span.opener + 1 + ins.offset),
-        snippet: ins.snippet,
-      });
-      declared = missing.length;
-    }
+    declared = appendInlineDeclarations(plan, crate, site, fields);
   } else if (!plan.create) {
     // one created declaration file per plan
     plan.create = {
@@ -669,6 +724,75 @@ function appendDeclarations(
     });
   }
   return declared;
+}
+
+/**
+ * Declares the `fields` missing from an existing declaration file. Returns
+ * the number of fields added. A `fields!` block without the macro import
+ * never compiles, so when the file calls the macro but does not import it
+ * the `use duck_trait::fields;` line is wired in alongside the new entry.
+ */
+function appendFileDeclarations(
+  plan: FixPlan,
+  crate: Crate,
+  target: string,
+  text: string,
+  fields: string[],
+): number {
+  const known = new Set(declaredFields(text));
+  const missing = fields.filter(f => !known.has(f));
+  const indent = crateIndent(crate, text);
+  const block = findFirstFieldsBlock(text, indent);
+  if (missing.length > 0) {
+    const ins = block
+      ? insertionFor(text, block, missing)
+      : appendedFieldsBlock(text, missing, indent);
+    plan.edits.push({ path: target, ...positionAt(text, ins.offset), snippet: ins.snippet });
+  }
+  // only the block path needs the import here — appendedFieldsBlock (no
+  // block) already appends the import together with the new block
+  if (block && !hasFieldsImport(text)) {
+    const ins = fieldsImportInsertion(text);
+    if (ins) {
+      plan.edits.push({ path: target, ...positionAt(text, ins.offset), snippet: ins.snippet });
+    }
+  }
+  return missing.length;
+}
+
+/** The inline-module counterpart of {@link appendFileDeclarations}. */
+function appendInlineDeclarations(
+  plan: FixPlan,
+  crate: Crate,
+  site: { rootFile: string; rootText: string; span: InlineModule },
+  fields: string[],
+): number {
+  const bodyText = site.rootText.slice(site.span.opener + 1, site.span.closer);
+  const known = new Set(declaredFields(bodyText));
+  const missing = fields.filter(f => !known.has(f));
+  const step = crateIndent(crate, site.rootText) ?? '    ';
+  const block = findFirstFieldsBlock(bodyText, step);
+  if (missing.length > 0) {
+    const ins = block
+      ? insertionFor(bodyText, block, missing)
+      : appendedFieldsBlock(bodyText, missing, step + step);
+    plan.edits.push({
+      path: site.rootFile,
+      ...positionAt(site.rootText, site.span.opener + 1 + ins.offset),
+      snippet: ins.snippet,
+    });
+  }
+  if (block && !hasFieldsImport(bodyText)) {
+    const ins = fieldsImportInsertion(bodyText, step);
+    if (ins) {
+      plan.edits.push({
+        path: site.rootFile,
+        ...positionAt(site.rootText, site.span.opener + 1 + ins.offset),
+        snippet: ins.snippet,
+      });
+    }
+  }
+  return missing.length;
 }
 
 function locateCrate(fromDir: string): Crate | undefined {

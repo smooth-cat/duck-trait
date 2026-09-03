@@ -214,6 +214,84 @@ export function appendedFieldsBlock(
 }
 
 /**
+ * Where to place `use duck_trait::fields;` when `text` does not import the
+ * macro yet: right after the leading `//!` docs, inner attributes and blank
+ * lines — and after the `use` run that follows them, so imports stay grouped:
+ *
+ *   fields! { value }                    -> `use duck_trait::fields;\n\n` at 0
+ *   //! doc\nfields! { value }           -> right after `//! doc\n`
+ *   use duck_trait::props;\nfields!...   -> right after the props import
+ *
+ * Returns undefined when the import already exists. `indent` prefixes the new
+ * line (used for imports inside inline modules).
+ */
+export function fieldsImportInsertion(text: string, indent = ''): Insertion | undefined {
+  if (hasFieldsImport(text)) {
+    return undefined;
+  }
+  const offset = leadingRunEnd(text);
+  const prefix = offset > 0 && text[offset - 1] !== '\n' ? '\n' : '';
+  const rest = text.slice(offset);
+  const suffix = rest === '' || rest.startsWith('\n') ? '' : '\n';
+  return { offset, snippet: `${prefix}${indent}use duck_trait::fields;\n${suffix}` };
+}
+
+/**
+ * The end of the leading run of `//!` module docs, inner attributes, blank
+ * lines and single-line `use` statements — the point right before the first
+ * item a fresh import can be inserted ahead of. A blank line ends the run
+ * when only plain items follow, so the new import lands right after the
+ * imports instead of behind a stray empty line.
+ */
+function leadingRunEnd(text: string): number {
+  const lines = text.split('\n');
+  const docLine = (t: string): boolean => t.startsWith('//!');
+  const useLine = (t: string): boolean =>
+    /^(?:pub(?:\([^)]*\))?\s+)?use\b[^;]*;\s*$/.test(t);
+  let offset = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (t === '') {
+      // the blank only extends the run when a skippable line follows it
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() === '') {
+        j++;
+      }
+      if (j < lines.length && (docLine(lines[j].trim()) || useLine(lines[j].trim()))) {
+        offset += lines[i].length + 1;
+        i++;
+        continue;
+      }
+      break;
+    }
+    if (t.startsWith('#![')) {
+      offset += lines[i].length + 1;
+      if (!t.endsWith(']')) {
+        // the inner attribute spans several lines
+        while (++i < lines.length && !lines[i].includes(']')) {
+          offset += lines[i].length + 1;
+        }
+        if (i < lines.length) {
+          offset += lines[i].length + 1;
+          i++;
+        }
+      } else {
+        i++;
+      }
+      continue;
+    }
+    if (docLine(t) || useLine(t)) {
+      offset += lines[i].length + 1;
+      i++;
+      continue;
+    }
+    break;
+  }
+  return Math.min(offset, text.length);
+}
+
+/**
  * Content written when the target declaration file does not exist yet.
  * Without fields the file holds only the import (an empty `fields!` block
  * would not compile — the macro requires at least one name).

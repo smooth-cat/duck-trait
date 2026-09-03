@@ -185,3 +185,97 @@ export function workspaceMembers(cargoTomlText: string): string[] {
   }
   return members;
 }
+
+/** The dependency sections of a package manifest (members opt in there). */
+const DEPENDENCY_SECTIONS = new Set(['dependencies', 'dev-dependencies', 'build-dependencies']);
+
+interface TomlSection {
+  name: string;
+  body: string;
+}
+
+/** `[header]` / `[[header]]` sections of a TOML document, bodies included. */
+function tomlSections(text: string): TomlSection[] {
+  const out: TomlSection[] = [];
+  let current: TomlSection | undefined;
+  for (const raw of text.split('\n')) {
+    const m = /^\s*\[\[?([^\]]+)\]?\]\s*$/.exec(raw);
+    if (m) {
+      current = { name: m[1].trim(), body: '' };
+      out.push(current);
+    } else if (current) {
+      current.body += `${raw}\n`;
+    }
+  }
+  return out;
+}
+
+/** `key = ..` entries of a dependency section, multi-line tables included. */
+function dependencyEntries(body: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = [];
+  const keyRe = /^([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*=\s*(.*)$/;
+  let key: string | undefined;
+  let value = '';
+  const flush = (): void => {
+    if (key !== undefined) {
+      out.push({ key, value });
+    }
+    key = undefined;
+    value = '';
+  };
+  for (const raw of body.split('\n')) {
+    const line = raw.split('#')[0]; // drop trailing comments
+    if (key === undefined) {
+      const m = keyRe.exec(line.trim());
+      if (!m) {
+        continue;
+      }
+      key = m[1];
+      value = m[2];
+    } else {
+      value += ` ${line.trim()}`;
+    }
+    let d = 0;
+    for (const c of value) {
+      if (c === '{') {
+        d++;
+      } else if (c === '}') {
+        d--;
+      }
+    }
+    // balanced by the end of the line → the entry is complete
+    if (d === 0) {
+      flush();
+    }
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Whether the Cargo.toml declares `dep` as a direct dependency of the package
+ * (in `[dependencies]`, `[dev-dependencies]` or `[build-dependencies]`). A
+ * shared `[workspace.dependencies]` entry does not count by itself — the
+ * member manifest must opt in. Renames and workspace inheritance are honored:
+ *
+ *   duck-trait = "0.13"                          -> true
+ *   duck-trait = { path = "../duck-trait" }      -> true
+ *   duck-trait.workspace = true                  -> true
+ *   dt = { package = "duck-trait", path = ".." } -> true
+ *   duck-trait-lite = "1"                        -> false
+ *   [workspace.dependencies] duck-trait = ..     -> false (member does not opt in)
+ */
+export function hasDependency(cargoTomlText: string, dep: string): boolean {
+  const packageRe = new RegExp(`package\\s*=\\s*["']${dep}["']`);
+  for (const section of tomlSections(cargoTomlText)) {
+    if (!DEPENDENCY_SECTIONS.has(section.name)) {
+      continue;
+    }
+    for (const entry of dependencyEntries(section.body)) {
+      if (entry.key.split('.')[0] === dep || packageRe.test(entry.value)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
