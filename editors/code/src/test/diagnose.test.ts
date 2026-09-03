@@ -26,11 +26,19 @@ test('matches the missing module declaration (E0433)', () => {
   assert.deepEqual(hit, { modName: '_fields' });
 });
 
+test('matches a trait referenced in this scope without an import (E0405)', () => {
+  const hit = matchDuckTraitDiag(
+    "cannot find trait `_Value` in this scope\n\n --> src/api.rs:4:12",
+  );
+  assert.deepEqual(hit, { traitName: '_Value' });
+});
+
 test('rejects non-underscored traits and unrelated messages', () => {
   assert.equal(
     matchDuckTraitDiag('cannot find trait `Display` in module `core::fmt`'),
     undefined,
   );
+  assert.equal(matchDuckTraitDiag('cannot find trait `Display` in this scope'), undefined);
   assert.equal(matchDuckTraitDiag('borrowed value does not implement any call'), undefined);
   assert.equal(matchDuckTraitDiag(''), undefined);
 });

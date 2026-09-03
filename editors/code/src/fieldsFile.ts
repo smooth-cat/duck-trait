@@ -229,11 +229,16 @@ export function fieldsImportInsertion(text: string, indent = ''): Insertion | un
   if (hasFieldsImport(text)) {
     return undefined;
   }
+  return insertionAtPreambleEnd(text, `${indent}use duck_trait::fields;`);
+}
+
+/** An insertion appending `line` right after the file's leading import run. */
+function insertionAtPreambleEnd(text: string, line: string): Insertion {
   const offset = leadingRunEnd(text);
   const prefix = offset > 0 && text[offset - 1] !== '\n' ? '\n' : '';
   const rest = text.slice(offset);
   const suffix = rest === '' || rest.startsWith('\n') ? '' : '\n';
-  return { offset, snippet: `${prefix}${indent}use duck_trait::fields;\n${suffix}` };
+  return { offset, snippet: `${prefix}${line}\n${suffix}` };
 }
 
 /**

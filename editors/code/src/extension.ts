@@ -42,7 +42,10 @@ export function activate(context: vscode.ExtensionContext): void {
           ins.snippet,
         );
       }
-      if (!(await vscode.workspace.applyEdit(edit))) {
+      // import-only fixes carry no text changes — an empty WorkspaceEdit
+      // resolves to `false`, which is not a failure
+      const hasTextChanges = plan.edits.length > 0 || plan.create !== undefined;
+      if (hasTextChanges && !(await vscode.workspace.applyEdit(edit))) {
         void vscode.window.showErrorMessage('duck-trait: failed to apply the fix');
         return;
       }
@@ -56,6 +59,15 @@ export function activate(context: vscode.ExtensionContext): void {
         if (doc?.isDirty) {
           await doc.save();
         }
+      }
+      // the declaration is on disk now — let rust-analyzer bring the
+      // referenced traits into scope at the position only it can determine
+      log(`applyFix: ${plan.edits.length} edit(s), ${plan.imports?.length ?? 0} import request(s)`);
+      try {
+        await applyRustAnalyzerImports(plan.imports ?? []);
+      } catch (e) {
+        log(`applyFix: import phase threw: ${String(e)}`);
+        void vscode.window.showErrorMessage(`duck-trait: import phase failed: ${String(e)}`);
       }
     }),
     vscode.commands.registerCommand('duck-trait.declareFile', async () => {
@@ -93,6 +105,8 @@ export function activate(context: vscode.ExtensionContext): void {
         clearTimeout(timer);
       }
       autoDeclarePending.clear();
+      duckTraitOutput?.dispose();
+      duckTraitOutput = undefined;
     }),
   );
 }
@@ -120,18 +134,22 @@ function maybeAutoDeclare(doc: vscode.TextDocument): void {
     return;
   }
   const crate = locateCrate(path.dirname(doc.uri.fsPath));
-  if (!crate || !entryFileOf(crate)) {
-    return;
-  }
-  const manifest = path.join(crate.root, 'Cargo.toml');
-  try {
-    if (!hasDependency(fs.readFileSync(manifest, 'utf8'), 'duck-trait')) {
-      return; // the crate does not use duck-trait — nothing to auto-generate
-    }
-  } catch {
+  if (!crate || !entryFileOf(crate) || !dependsOnDuckTrait(crate)) {
     return;
   }
   scheduleAutoDeclare(crate, doc.uri.fsPath);
+}
+
+/** Whether the crate's own manifest declares a `duck-trait` dependency. */
+function dependsOnDuckTrait(crate: Crate): boolean {
+  try {
+    return hasDependency(
+      fs.readFileSync(path.join(crate.root, 'Cargo.toml'), 'utf8'),
+      'duck-trait',
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -159,6 +177,177 @@ function enqueueAutoDeclare(crate: Crate, file: string): Promise<void> {
   const own = autoDeclareChain.then(run, run).catch(() => {});
   autoDeclareChain = own;
   return own;
+}
+
+/** How long to wait for rust-analyzer to offer the import quick fix. */
+const IMPORT_WAIT_MS = 3000;
+const IMPORT_POLL_MS = 100;
+
+/**
+ * Lets rust-analyzer add the `use <..>::_Trait;` statements for `imports`:
+ * the declarations are already saved, so rust-analyzer now sees the trait
+ * and offers its "Import `_Xxx`" quick fix at the exact scope that needs it.
+ * The provider is polled over a short window (rust-analyzer needs an analysis
+ * round after the save); when it never offers the import the failure is
+ * reported instead of being silently dropped.
+ */
+async function applyRustAnalyzerImports(imports: ImportRequest[]): Promise<void> {
+  if (imports.length === 0) {
+    log('imports: nothing to do');
+    return;
+  }
+  for (const request of imports) {
+    const uri = vscode.Uri.file(request.path);
+    log(`import: waiting for rust-analyzer on ${request.traitName} (${request.path})`);
+    let doc: vscode.TextDocument | undefined;
+    try {
+      doc = await vscode.workspace.openTextDocument(uri);
+    } catch (e) {
+      log(`import: cannot open ${request.path}: ${String(e)}`);
+      continue;
+    }
+    const text = doc.getText();
+    const deadline = Date.now() + IMPORT_WAIT_MS;
+    let applied = false;
+    let lastTitles: string[] = [];
+    while (Date.now() < deadline && !applied) {
+      // mirror the Cmd+. trigger: the precise `_Xxx` token positions (the
+      // diagnostic span alone may not anchor rust-analyzer's import assist),
+      // always tried — no kind filter, everything is title-matched below
+      const ranges = traitOccurrenceRanges(text, request.traitName);
+      if (ranges.length === 0) {
+        await sleep(IMPORT_POLL_MS); // not re-analyzed yet
+        continue;
+      }
+      for (const range of ranges) {
+        let actions: vscode.CodeAction[];
+        try {
+          actions =
+            (await vscode.commands.executeCommand<vscode.CodeAction[]>(
+              'vscode.executeCodeActionProvider',
+              uri,
+              range,
+            )) ?? [];
+        } catch (e) {
+          log(`import: code action provider failed: ${String(e)}`);
+          break;
+        }
+        if (actions.length > 0) {
+          lastTitles = actions.map(a => a.title);
+          log(
+            `import: ${actions.length} action(s) at ${range.start.line}:${range.start.character}: ` +
+              lastTitles.join(' | '),
+          );
+        }
+        const importAction = actions.find(
+          a => /^Import\b/.test(a.title) && a.title.includes(request.traitName),
+        );
+        if (!importAction) {
+          continue; // stale analysis — wait for the next round
+        }
+        applied = await applyImportAction(doc, importAction);
+        if (applied) {
+          log(`import: "${importAction.title}" applied`);
+        }
+        break;
+      }
+      if (!applied) {
+        await sleep(IMPORT_POLL_MS);
+      }
+    }
+    if (!applied) {
+      if (findScopeDiagnostic(uri, request.traitName)) {
+        const seen =
+          lastTitles.length > 0 ? ` (got: ${lastTitles.slice(0, 6).join(', ')})` : '';
+        const message =
+          `rust-analyzer did not offer "Import \`${request.traitName}\`"` +
+          `${seen} — see the duck-trait output channel for details`;
+        log(`import: ${message}`);
+        void vscode.window.showWarningMessage(`duck-trait: ${message}`);
+      } else {
+        log('import: no scope diagnostic remains — treating the import as resolved');
+      }
+    }
+  }
+}
+
+/** The `cannot find trait \`_Xxx\` in this scope` diagnostic of `uri`, if any. */
+function findScopeDiagnostic(uri: vscode.Uri, traitName: string): vscode.Diagnostic | undefined {
+  const message = new RegExp(`cannot find trait \`${traitName}\` in this scope`);
+  return vscode.languages.getDiagnostics(uri).find(d => message.test(d.message));
+}
+
+/**
+ * Applies a rust-analyzer import code action to `doc`. Tries the action's
+ * `edit` first; when the raw WorkspaceEdit cannot be applied (which happens
+ * for versioned server edits), falls back to executing the action's command
+ * (rust-analyzer then applies the change through its own client). Returns
+ * whether the import landed.
+ */
+async function applyImportAction(
+  doc: vscode.TextDocument,
+  action: vscode.CodeAction,
+): Promise<boolean> {
+  if (action.edit) {
+    try {
+      if (await vscode.workspace.applyEdit(action.edit)) {
+        if (doc.isDirty) {
+          await doc.save();
+        }
+        return true;
+      }
+      log(`import: applyEdit("${action.title}") returned false`);
+    } catch (e) {
+      log(`import: applyEdit("${action.title}") threw: ${String(e)}`);
+    }
+  }
+  if (action.command) {
+    try {
+      await vscode.commands.executeCommand(
+        action.command.command,
+        ...(action.command.arguments ?? []),
+      );
+      if (doc.isDirty) {
+        await doc.save();
+      }
+      return true;
+    } catch (e) {
+      log(`import: command "${action.command.command}" threw: ${String(e)}`);
+    }
+  }
+  if (!action.edit && !action.command) {
+    log(`import: "${action.title}" has no edit or command`);
+  }
+  return false;
+}
+
+/** Up to five `_Xxx` token positions in `text` (anchor for the provider). */
+function traitOccurrenceRanges(text: string, traitName: string): vscode.Range[] {
+  const safe = traitName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out: vscode.Range[] = [];
+  const re = new RegExp(`\\b${safe}\\b`, 'g');
+  let m: RegExpExecArray | null;
+  while (out.length < 5 && (m = re.exec(text))) {
+    const before = text.slice(0, m.index);
+    const line = (before.match(/\n/g) ?? []).length;
+    const character = m.index - (before.lastIndexOf('\n') + 1);
+    out.push(
+      new vscode.Range(
+        new vscode.Position(line, character),
+        new vscode.Position(line, character + traitName.length),
+      ),
+    );
+  }
+  return out;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Debug output — never shown unless the user opens the channel. */
+let duckTraitOutput: vscode.OutputChannel | undefined;
+function log(message: string): void {
+  duckTraitOutput ??= vscode.window.createOutputChannel('duck-trait');
+  duckTraitOutput.appendLine(message);
 }
 
 /**
@@ -414,11 +603,31 @@ async function createFieldsFile(crate: Crate): Promise<void> {
 interface FixPlan {
   create?: { path: string; content: string };
   edits: { path: string; line: number; character: number; snippet: string }[];
+  /** scope references — rust-analyzer adds their `use` after the declaration. */
+  imports?: ImportRequest[];
+}
+
+/** A `use <..>::_Trait;` that rust-analyzer should insert for the file `path`. */
+interface ImportRequest {
+  path: string;
+  traitName: string;
 }
 
 interface Crate {
   root: string;
   srcDir: string;
+}
+
+/**
+ * A duck-trait diagnostic awaiting its declare fix. `importTrait` marks the
+ * ones where the file references the trait itself (generic bound, impl, ...)
+ * — those get a `use <modulePath>::_Trait;` line as well.
+ */
+interface UnresolvedTrait {
+  diag: vscode.Diagnostic;
+  traitName: string;
+  modulePath: string;
+  importTrait: boolean;
 }
 
 class DuckTraitFixProvider implements vscode.CodeActionProvider {
@@ -432,26 +641,67 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
     // collect every diagnostic of the file so fixes are offered anywhere in it
     const diagnostics = collectFileDiagnostics(document.uri, context);
     const actions: vscode.CodeAction[] = [];
-    const unresolved: { diag: vscode.Diagnostic; traitName: string; modulePath: string }[] = [];
+    const docText = liveText(document.uri.fsPath);
+    // one entry per declaration module + trait; a trait reported both by a
+    // generated impl and by a scope reference keeps the import requirement
+    const byTrait = new Map<string, UnresolvedTrait>();
     for (const diag of diagnostics) {
       const hit = matchDuckTraitDiag(diag.message);
       if (!hit) {
         continue;
       }
-      if ('traitName' in hit) {
-        unresolved.push({ diag, traitName: hit.traitName, modulePath: hit.modulePath });
-        const action = this.buildTraitAction(document.uri, diag, hit.traitName, hit.modulePath);
-        if (action) {
-          actions.push(action);
-        }
-      } else {
+      if ('modName' in hit) {
         const action = this.buildModuleAction(document.uri, diag, hit.modName);
         if (action) {
           actions.push(action);
         }
+      } else if ('modulePath' in hit) {
+        const key = `${hit.modulePath}::${hit.traitName}`;
+        if (!byTrait.has(key)) {
+          // `#[props]`-generated impl errors only need the declaration — no
+          // import is added here; the scope variant below takes over when the
+          // file also spells `_Xxx` out (generic bound, impl, ...)
+          byTrait.set(key, {
+            diag,
+            traitName: hit.traitName,
+            modulePath: hit.modulePath,
+            importTrait: false,
+          });
+        }
+      } else {
+        // `cannot find trait .. in this scope`: the generated impls are not
+        // involved, so only offer the fix when the crate uses duck-trait at
+        // all (keeps unrelated `_X`-style traits out of _fields.rs)
+        const crate = locateCrate(path.dirname(document.uri.fsPath));
+        if (!crate || !dependsOnDuckTrait(crate) || docText === undefined) {
+          continue;
+        }
+        const field = resolveFieldName(hit.traitName, docText);
+        if (!field) {
+          continue;
+        }
+        const modulePath = inferScopeModule(crate, docText, field);
+        byTrait.set(`${modulePath}::${hit.traitName}`, {
+          diag,
+          traitName: hit.traitName,
+          modulePath,
+          importTrait: true,
+        });
       }
     }
-    const batch = this.buildBatchAction(document.uri, unresolved);
+    for (const unresolved of byTrait.values()) {
+      const action = this.buildTraitAction(
+        document.uri,
+        unresolved.diag,
+        unresolved.traitName,
+        unresolved.modulePath,
+        unresolved.importTrait,
+      );
+      if (action) {
+        actions.push(action);
+      }
+    }
+    const batch = this.buildBatchAction(document.uri, [...byTrait.values()]);
     if (batch) {
       // more than one field missing: the all-in-one fix takes precedence and
       // the per-field fixes step back
@@ -464,11 +714,12 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
   /**
    * One click declares every missing field of this file: the unresolved-trait
    * diagnostics are deduplicated, resolved to their `#[prop]` spellings and
-   * grouped per declaration module.
+   * grouped per declaration module. Traits referenced in the file's own scope
+   * are queued for rust-analyzer to import afterwards.
    */
   private buildBatchAction(
     docUri: vscode.Uri,
-    unresolved: { diag: vscode.Diagnostic; traitName: string; modulePath: string }[],
+    unresolved: UnresolvedTrait[],
   ): vscode.CodeAction | undefined {
     if (unresolved.length < 2) {
       return undefined; // the per-field fix already covers it
@@ -485,7 +736,8 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
     const seen = new Set<string>();
     const fields: string[] = [];
     const byModule = new Map<string, string[]>();
-    for (const { traitName, modulePath } of unresolved) {
+    const importTraits = new Set<string>();
+    for (const { traitName, modulePath, importTrait } of unresolved) {
       const key = `${modulePath}::${traitName}`;
       if (seen.has(key)) {
         continue;
@@ -499,20 +751,25 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
       const list = byModule.get(modulePath) ?? [];
       list.push(field);
       byModule.set(modulePath, list);
+      if (importTrait) {
+        importTraits.add(traitName);
+      }
     }
     if (fields.length < 2) {
       return undefined;
     }
 
     const plan: FixPlan = { edits: [] };
-    let declared = 0;
     for (const [modulePath, fields] of byModule) {
       const segments = modulePath.replace(/^crate::/, '').split('::');
       const site = declarationSite(crate, segments);
       if (!site) {
         return undefined;
       }
-      declared += appendDeclarations(crate, site, segments, fields, plan);
+      appendDeclarations(crate, site, segments, fields, plan);
+    }
+    for (const traitName of importTraits) {
+      (plan.imports ??= []).push({ path: docUri.fsPath, traitName });
     }
 
     const rel =
@@ -529,12 +786,19 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
     return action;
   }
 
-  /** `cannot find trait \`_Value\` in module \`crate::_fields\`` — declare the field. */
+  /**
+   * `cannot find trait \`_Value\` in module \`crate::_fields\`` (generated
+   * impl) or `.. in this scope` (the file uses the trait itself) — declare
+   * the field. The scope variant (`importTrait`) queues the trait for
+   * rust-analyzer to import into the current file after the declaration
+   * landed.
+   */
   private buildTraitAction(
     docUri: vscode.Uri,
     diag: vscode.Diagnostic,
     traitName: string,
     modulePath: string,
+    importTrait = false,
   ): vscode.CodeAction | undefined {
     const crate = locateCrate(path.dirname(docUri.fsPath));
     if (!crate) {
@@ -556,17 +820,23 @@ class DuckTraitFixProvider implements vscode.CodeActionProvider {
       return undefined;
     }
     const plan: FixPlan = { edits: [] };
-    if (appendDeclarations(crate, site, segments, [field], plan) === 0 && plan.edits.length === 0) {
-      return undefined; // already declared — a stale diagnostic
+    appendDeclarations(crate, site, segments, [field], plan);
+    if (importTrait) {
+      (plan.imports ??= []).push({ path: docUri.fsPath, traitName });
+    }
+    if (plan.edits.length === 0 && (plan.imports?.length ?? 0) === 0) {
+      return undefined; // already declared and imported — a stale diagnostic
     }
     const targetRel =
       site.kind === 'missing'
         ? path.relative(crate.root, site.target)
         : path.relative(crate.root, site.kind === 'file' ? site.target : site.rootFile);
-    return this.planAction(
+    const declare =
       site.kind === 'missing'
         ? `duck-trait: create ${targetRel} and declare \`${field}\``
-        : `duck-trait: declare \`${field}\` in ${targetRel}`,
+        : `duck-trait: declare \`${field}\` in ${targetRel}`;
+    return this.planAction(
+      importTrait ? `${declare} and import \`${traitName}\`` : declare,
       plan,
       diag,
     );
@@ -685,6 +955,46 @@ function declarationSite(crate: Crate, segments: string[]): DeclarationSite | un
     return { kind: 'inline', target, rootFile, rootText, span: inline };
   }
   return { kind: 'missing', target, rootFile, rootText };
+}
+
+/**
+ * The declaration module a trait referenced in `docText`'s own scope lives
+ * in. `cannot find trait .. in this scope` carries no module path, so the
+ * file's `#[props]` structs are the evidence: a candidate that already
+ * declares the field wins, a single candidate is used as-is, and everything
+ * else falls back to the conventional `crate::_fields`.
+ */
+function inferScopeModule(crate: Crate, docText: string, field: string): string {
+  const paths = new Set<string>();
+  for (const struct of scanPropsStructs(docText)) {
+    paths.add(struct.modulePath ?? 'crate::_fields');
+  }
+  if (paths.size === 0) {
+    return 'crate::_fields';
+  }
+  for (const modulePath of paths) {
+    if (moduleDeclaresField(crate, modulePath, field)) {
+      return modulePath;
+    }
+  }
+  return paths.size === 1 ? [...paths][0] : 'crate::_fields';
+}
+
+/** Whether the declaration site of `modulePath` already declares `field`. */
+function moduleDeclaresField(crate: Crate, modulePath: string, field: string): boolean {
+  const segments = modulePath.replace(/^crate::/, '').split('::');
+  const site = declarationSite(crate, segments);
+  if (!site) {
+    return false;
+  }
+  if (site.kind === 'file') {
+    return declaredFields(site.text).includes(field);
+  }
+  if (site.kind === 'inline') {
+    const body = site.rootText.slice(site.span.opener + 1, site.span.closer);
+    return declaredFields(body).includes(field);
+  }
+  return false;
 }
 
 /**

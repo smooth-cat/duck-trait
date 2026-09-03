@@ -2,7 +2,7 @@
   "name": "duck-trait",
   "displayName": "duck-trait",
   "description": "Quick fixes for duck-trait's field-based api: declare missing accessor traits in _fields.rs from the `Cmd+.` menu, or automatically when a Rust file is saved.",
-  "version": "0.11.6",
+  "version": "0.11.15",
   "publisher": "smooth-cat",
   "license": "MIT OR Apache-2.0",
   "repository": {
